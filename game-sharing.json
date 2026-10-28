@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "title": "CAPBALL — bottle-cap street football",
+  "description": "Flick bottle caps into a ball, bang it off the boards and score in the car park. Two-player pass-and-play with quick matches, penalty shootouts and a street tournament. Works offline.",
+  "defaultCaptions": {
+    "x": "Flicked a bottle cap off the boards and into the top bin. CAPBALL — street football for two thumbs.",
+    "facebook": "CAPBALL: bottle-cap street football. Flick your caps, chain passes for a power shot, and settle it on penalties.",
+    "reddit": "I made a physics bottle-cap football game: caps slide, collide and settle for real, and the boards count as a teammate.",
+    "discord": "CAPBALL night? Pass-and-play bottle-cap football: quick match, penalty shootout or a 4-crew tournament."
+  },
+  "assets": { "og": "public/share/og.png", "favicon": "public/share/favicon.png" }
+}

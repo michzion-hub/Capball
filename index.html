@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#18171b" />
+    <meta name="description" content="CAPBALL — bottle-cap street football. Flick caps, bang it off the boards, chain passes into a power shot. Local two-player." />
+    <title>CAPBALL — bottle-cap street football</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="CAPBALL" />
+    <link rel="preload" href="./fonts/Bangers-Regular.ttf" as="font" type="font/ttf" crossorigin />
+    <link rel="preload" href="./fonts/PermanentMarker-Regular.ttf" as="font" type="font/ttf" crossorigin />
+    <style>
+      #boot { position: fixed; inset: 0; display: grid; place-items: center; background: #18171b; color: #f3eee2; font: 700 14px system-ui, sans-serif; z-index: 10; transition: opacity .3s; }
+      #boot .b { display: grid; justify-items: center; gap: 14px; }
+      #boot .cap { width: 64px; height: 64px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #ffb08c, #ff5a1f 45%, #a8300a); border: 4px dashed #151515; animation: spin 1s linear infinite; }
+      #boot .bar { width: 160px; height: 8px; background: #333; overflow: hidden; }
+      #boot .bar i { display: block; height: 100%; width: 40%; background: #ff5a1f; animation: slide 1s ease-in-out infinite alternate; }
+      #boot.err .bar i { animation: none; width: 100%; background: #d6201a; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(210%); } }
+    </style>
+  </head>
+  <body>
+    <div id="boot"><div class="b"><img src="./favicon.svg" alt="" width="72" height="72" style="display:block;margin:0 auto 10px" /><div style="letter-spacing:3px">CAPBALL</div><div class="bar"><i></i></div><div id="boot-msg">Loading…</div></div></div>
+    <canvas id="game"></canvas>
+    <div id="ui"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

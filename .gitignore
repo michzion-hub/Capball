@@ -1,0 +1,7 @@
+node_modules/
+dist/
+shots/
+/.manus-webdev/preview-identity.json
+# Legacy Manus asset-store copies; runtime uses the checked-in files under public/share/.
+/assets/share/favicon.png
+/assets/share/og.png
