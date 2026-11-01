@@ -87,8 +87,8 @@ export const DEADBALL = {
   edgeMargin: 5,
   /** A cap this close (gap, wu) to a ball on the boards is pinning it. */
   pinGap: 3,
-  /** How far toward the centre the ref drops the ball. */
-  dropDistance: 80,
+  /** How far toward the centre the ref drops the ball: one standard-cap width. */
+  dropDistance: 44,
   /** Caps are moved out of this radius around the drop spot. */
   clearRadius: 48,
 } as const

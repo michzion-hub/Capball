@@ -1,4 +1,5 @@
 import { BALL, CAP_TYPES, FX, INPUT, LINEUP, PHYSICS, PITCH, PLAIN_LINEUP } from '../config/tuning'
+import { FOOTBALL } from '../config/football'
 import type { CapTypeId, SurfaceId } from '../config/tuning'
 import type { Ruleset } from '../config/rulesets'
 import { PhysicsWorld } from '../physics/world'
@@ -7,7 +8,7 @@ import { SettleDetector } from '../physics/settle'
 import { Emitter } from './emitter'
 import { CENTER, kickoffPosition } from './formation'
 import { DeadBallWatch, dropSpot } from './deadball'
-import { PlayTracker, newPossession, offsideCaps, outcomeReason } from './play'
+import { PlayTracker, inPenaltyBox, newPossession, offsideCaps, outcomeReason } from './play'
 import type { Outcome, Possession, TrackerEvent, Whistle } from './play'
 import { GoalLatch, addGoal, goalTargetWinner, otherTeam, timeWinner } from './rules'
 import type { ScoreState } from './rules'
@@ -47,6 +48,7 @@ export type MatchEvents = {
   kick: { team: TeamIndex; scored: boolean; saved: boolean; tally: [boolean[], boolean[]] }
   settled: { playMs: number }
   whistle: Whistle | { kind: 'dropball'; at: Vec }
+  restart: { kind: Outcome['kind']; team: TeamIndex; at: Vec | null; end: 0 | 1 | null; retake: boolean }
   play: TrackerEvent
   half: { half: number; of: number }
   /** Fired every fixed step while bodies move (dust, trails). */
@@ -107,6 +109,8 @@ export class Match {
   private keeperTouched = false
   private readonly deadBall: DeadBallWatch
   private ballAtFlick: Vec = { x: 0, y: 0 }
+  private goalKickEnd: 0 | 1 | null = null
+  private goalKickCleared = false
 
   constructor(readonly options: MatchOptions) {
     this.ruleset = options.ruleset
@@ -204,6 +208,7 @@ export class Match {
     if (!body || !this.world.isActive(body)) return false
     if (this.world.capInfo(capId).team !== this.team) return false
     if (this.shootout) return this.reason === 'keeper' ? capId === this.keeperId : capId === this.takerId
+    if (this.reason === 'penalty') return capId === this.takerId
     return true
   }
 
@@ -224,6 +229,14 @@ export class Match {
     const kicker = this.shootout.kicker
     this.turns.startTurn(kicker, 'shootout')
     this.events.emit('turn', { team: kicker, reason: 'shootout' })
+  }
+
+  concede(winner: TeamIndex): boolean {
+    if (this.phase === 'over' || this.shootout) return false
+    this.turns.finish()
+    this.events.emit('phase', { phase: 'over' })
+    this.events.emit('win', { team: winner, score: this.score, reason: 'target' })
+    return true
   }
 
   /**
@@ -270,6 +283,43 @@ export class Match {
     return true
   }
 
+  /** Rule-only foul for an illegal multi-finger attempt during a local aiming turn. */
+  awardInputFoul(at: Vec): boolean {
+    if (this.phase !== 'aim' || this.shootout || !this.ruleset.freeKicks) return false
+    const offender = this.team
+    const victim = otherTeam(offender)
+    const end = offender as 0 | 1
+    const outcome: Outcome = this.ruleset.penalties && inPenaltyBox(at, end)
+      ? { kind: 'penalty', next: victim, end }
+      : { kind: 'freekick', next: victim, at, reason: 'freekick' }
+    if (outcome.kind === 'penalty') {
+      const caps = this.pieceCaps()
+      this.takerId = (caps.find(c => c.active && c.team === outcome.next && c.slot === 4)
+        ?? caps.find(c => c.active && c.team === outcome.next))?.id ?? -1
+      this.keeperId = caps.find(c => c.active && c.team === outcome.end && c.slot === 0)?.id ?? -1
+    } else {
+      this.takerId = -1
+      this.keeperId = -1
+    }
+    this.play = null
+    this.armed = null
+    this.possession.chain = [0, 0]
+    this.possession.lastCap = null
+    this.turns.enter('reset')
+    this.events.emit('whistle', { kind: 'foul', at, offender, victimCap: -1 })
+    this.events.emit('phase', { phase: 'reset' })
+    const targets = setPieceTargets(outcome, this.pieceCaps(), this.world.ball.position, this.ruleset)
+    if (!targets) return false
+    this.events.emit('restart', { kind: outcome.kind, team: victim, at, end: outcome.kind === 'penalty' ? outcome.end : null, retake: false })
+    const reason = outcomeReason(outcome)
+    this.startTween([...targets.caps, targets.ball], () => {
+      this.turns.startTurn(victim, reason)
+      this.events.emit('phase', { phase: 'aim' })
+      this.events.emit('turn', { team: victim, reason })
+    })
+    return true
+  }
+
   /** Same teams, same settings, score back to 0-0. */
   restart(): void {
     this.score = { goals: [0, 0] }
@@ -289,6 +339,8 @@ export class Match {
     this.settle.reset()
     this.holdAfterGoal = false
     this.deadBall.reset()
+    this.goalKickEnd = null
+    this.goalKickCleared = false
     this.kickoffTeam = this.options.firstTeam ?? 0
     if (this.shootout) {
       this.shootout = new ShootoutScore(this.shootout.first, this.shootout.rounds)
@@ -341,8 +393,11 @@ export class Match {
     this.onFixedStep?.()
     if (this.phase !== 'moving') return
     const ball = this.world.ball
+    this.updateGoalKickClearance(ball.position)
     const g = this.latch.check(ball.position.x, ball.position.y, BALL.radius)
     if (g) {
+      this.goalKickEnd = null
+      this.goalKickCleared = false
       if (this.shootout) {
         const kicker = this.shootout.kicker
         this.turns.goal()
@@ -369,6 +424,17 @@ export class Match {
     if (this.settle.update(this.world.isAtRest(), this.world.stepMs)) this.onSettled()
   }
 
+  private updateGoalKickClearance(p: Vec): void {
+    if (this.goalKickEnd === null || this.goalKickCleared) return
+    const half = PITCH.penaltyBox.width / 2
+    const outsideY = p.y < PITCH.height / 2 - half - FOOTBALL.goalKickClearance
+      || p.y > PITCH.height / 2 + half + FOOTBALL.goalKickClearance
+    const outsideX = this.goalKickEnd === 0
+      ? p.x > PITCH.penaltyBox.depth + FOOTBALL.goalKickClearance
+      : p.x < PITCH.width - PITCH.penaltyBox.depth - FOOTBALL.goalKickClearance
+    if (outsideX || outsideY) this.goalKickCleared = true
+  }
+
   private onSettled(): void {
     this.events.emit('settled', { playMs: this.settle.playMs })
     this.world.brake = 1
@@ -380,10 +446,22 @@ export class Match {
       this.afterKick()
       return
     }
-    let outcome: Outcome = this.play ? this.play.resolve() : { kind: 'normal', next: otherTeam(this.team) }
+    const ballNow = { x: this.world.ball.position.x, y: this.world.ball.position.y }
+    const play = this.play
+    let outcome: Outcome = play ? play.resolve(ballNow) : { kind: 'normal', next: otherTeam(this.team) }
+    if (play?.deferredFoul && !play.advantageApplied) this.events.emit('whistle', play.deferredFoul)
     this.play = null
     // Stuck ball: pinned against the boards and unmoved for N plays → the ref drops it back in.
-    const ballNow = { x: this.world.ball.position.x, y: this.world.ball.position.y }
+    let retake = false
+    if (this.goalKickEnd !== null) {
+      if (!this.goalKickCleared) {
+        outcome = { kind: 'goalkick', next: this.goalKickEnd, end: this.goalKickEnd, at: ballNow }
+        retake = true
+      } else {
+        this.goalKickEnd = null
+        this.goalKickCleared = false
+      }
+    }
     const circles = this.world.caps.filter(b => this.world.isActive(b)).map(b => ({ x: b.position.x, y: b.position.y, r: (b.circleRadius ?? 22) }))
     const stuck = this.deadBall.afterPlay(this.ballAtFlick, ballNow, circles)
     if (outcome.kind === 'normal' || outcome.kind === 'bonus') {
@@ -405,6 +483,31 @@ export class Match {
     }
     const targets = setPieceTargets(outcome, this.pieceCaps(), this.world.ball.position, this.ruleset)
     const reason = outcomeReason(outcome)
+    if (outcome.kind === 'penalty') {
+      const pieces = this.pieceCaps()
+      this.takerId = (pieces.find(c => c.active && c.team === outcome.next && c.slot === 4)
+        ?? pieces.find(c => c.active && c.team === outcome.next))?.id ?? -1
+      this.keeperId = pieces.find(c => c.active && c.team === outcome.end && c.slot === 0)?.id ?? -1
+    } else {
+      this.takerId = -1
+      this.keeperId = -1
+    }
+    if (outcome.kind === 'goalkick' && this.ruleset.goalKickRestriction) {
+      this.goalKickEnd = outcome.end
+      this.goalKickCleared = false
+    } else if (outcome.kind !== 'goalkick') {
+      this.goalKickEnd = null
+      this.goalKickCleared = false
+    }
+    if (outcome.kind !== 'normal' && outcome.kind !== 'bonus') {
+      this.events.emit('restart', {
+        kind: outcome.kind,
+        team: outcome.next,
+        at: 'at' in outcome ? outcome.at : null,
+        end: 'end' in outcome ? outcome.end : null,
+        retake,
+      })
+    }
     if (!targets) {
       this.turns.settled(outcome.next, reason)
       this.events.emit('phase', { phase: 'aim' })

@@ -5,12 +5,14 @@ import { Crowd } from './audio/crowd'
 import { RULESETS } from './config/rulesets'
 import type { Ruleset } from './config/rulesets'
 import { AI, CAP_TYPES, FX, INPUT, PITCH, SURFACES } from './config/tuning'
+import { FOOTBALL } from './config/football'
 import type { AiLevel, SurfaceId } from './config/tuning'
 import { AiBrain, captureBoard } from './ai/brain'
 import type { Decision } from './ai/brain'
 import { Particles, Shake } from './fx/effects'
 import { Match } from './game/match'
-import type { TrackerEvent, Whistle } from './game/play'
+import type { Outcome, TrackerEvent, Whistle } from './game/play'
+import { HiddenPenalty, legalKeeperPosition } from './game/penalty'
 import { ReplayRecorder } from './game/replay'
 import type { ReplayClip } from './game/replay'
 import { RIVAL_CREWS, Tournament } from './game/tournament'
@@ -18,6 +20,7 @@ import type { Tie } from './game/tournament'
 import type { TurnReason } from './game/turns'
 import { TuneOverlay, activeOverlays } from './debug/overlay'
 import { FlickInput, activeInputHandlers } from './input/flick'
+import { KeeperDragInput, RuleGestureGuard, activePenaltyInputHandlers } from './input/penalty'
 import type { FlickAim } from './input/flick'
 import type { Contact, TeamIndex, Vec } from './physics/world'
 import type { TeamDesign } from './render/capArt'
@@ -53,6 +56,8 @@ export class App {
   readonly particles = new Particles()
   readonly shake = new Shake()
   readonly input: FlickInput
+  readonly keeperInput: KeeperDragInput
+  readonly ruleGestureGuard: RuleGestureGuard
   readonly tune: TuneOverlay
   settings: Settings
   match: Match | null = null
@@ -89,13 +94,19 @@ export class App {
   private abort = new AbortController()
   private resizeObs: ResizeObserver
   private live = false
+  private hiddenPenalty: HiddenPenalty | null = null
+  private penaltyRevealTimer = 0
+  private penaltyTimerSecond = -1
+  private restartZone: { kind: Outcome['kind']; team: TeamIndex; at: Vec | null; end: 0 | 1 | null; retake: boolean } | null = null
+  private confirmAction: 'concede' | null = null
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas
     this.settings = loadSettings()
     this.teams = resolveKits(this.settings.teams[0], this.settings.teams[1])
-    this.ruleset = buildRuleset(this.settings.ruleset, this.settings.flags)
+    this.ruleset = buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout)
     this.renderer = new Renderer(canvas, this.teams)
+    this.renderer.layers.push(ctx => this.drawRestartZone(ctx))
     this.renderer.layers.push(ctx => this.particles.draw(ctx, [0]))
     this.renderer.overLayers.push(ctx => this.particles.draw(ctx, [1, 2]))
     this.renderer.overLayers.push(ctx => this.tune.drawWorld(ctx, this.renderer.view))
@@ -116,6 +127,16 @@ export class App {
       spinEnabled: () => !!this.match?.ruleset.spin,
     })
     this.input.attach()
+    this.keeperInput = new KeeperDragInput(canvas, this.renderer.view, {
+      target: () => this.keeperDragTarget(),
+      onMove: p => this.movePenaltyKeeper(p),
+    })
+    this.keeperInput.attach()
+    this.ruleGestureGuard = new RuleGestureGuard(canvas, this.renderer.view,
+      () => this.localRuleInputActive(),
+      at => { this.input.cancel(); this.keeperInput.cancel(); this.match?.awardInputFoul(at) },
+    )
+    this.ruleGestureGuard.attach()
     this.audio.setEnabled(this.settings.sound)
     this.audio.onReady = () => { if (this.settings.sound) this.crowd.start() }
     this.voice.enabled = this.settings.speech
@@ -246,8 +267,16 @@ export class App {
   private commitFlick(id: number, dir: Vec, power: number, spin: number): void {
     const m = this.match
     if (!m) return
+    if (this.mode !== 'online' && this.hiddenPenalty?.stage === 'shooter' && id === this.hiddenPenalty.takerId) {
+      if (this.hiddenPenalty.stageShot({ direction: dir, power })) {
+        this.ui.restartBanner('Shot staged · lock it to reveal', this.teams[this.hiddenPenalty.kicker].primary)
+        this.refreshActionButton()
+      }
+      return
+    }
     const arm = m.armed === m.team
     if (!m.tryFlick(id, dir, power, spin)) return
+    this.restartZone = null
     if (this.mode !== 'online') return
     const actionId = this.onlineClient?.sendFlick({ capId: id, dir, power, spin, arm }) ?? null
     if (actionId === null) { m.paused = true; this.ui.caption('Flick held while reconnecting — your mate will catch up.', 4000); return }
@@ -271,6 +300,7 @@ export class App {
           : 'Four crews, two semis, one final. Draws go to penalties.',
       presetId: this.settings.ruleset, overrides: this.settings.flags, surface: this.surface, showRules: m !== 'shootout',
       showAi: m === 'ai', aiLevel: this.settings.aiLevel,
+      penaltyTimeout: this.settings.penaltyTimeout, allowHiddenPenalties: m === 'quick' || m === 'tournament',
       goLabel: m === 'tournament' ? 'Draw the bracket' : m === 'ai' ? 'Take on the AI' : 'Kick off',
     }))
     this.ui.show('setup')
@@ -365,6 +395,7 @@ export class App {
       m.events.on('win', w => { if (!opts.online) this.onWin(w.team, w.score.goals, w.reason) }),
       m.events.on('phase', p => { if (p.phase !== 'aim') this.input.cancel(); this.refreshActionButton() }),
       m.events.on('whistle', w => this.onWhistle(w)),
+      m.events.on('restart', r => this.onRestart(r)),
       m.events.on('play', e => this.onPlayEvent(e)),
       m.events.on('half', h => { this.audio.whistle(true); this.ui.banner(h.half === 2 ? 'HALF TIME' : `HALF ${h.half}`, '#151515', 1800, true); this.say('halftime', {}, 3) }),
       m.events.on('kick', k => this.onKick(k.team, k.scored, k.saved)),
@@ -387,6 +418,14 @@ export class App {
 
   endMatch(): void {
     this.cancelAi()
+    window.clearTimeout(this.penaltyRevealTimer)
+    this.penaltyRevealTimer = 0
+    this.hiddenPenalty?.finish()
+    this.hiddenPenalty = null
+    this.keeperInput.cancel()
+    this.penaltyTimerSecond = -1
+    this.ui.setPenaltyTimer(null)
+    this.restartZone = null
     for (const u of this.matchUnsubs) u()
     this.matchUnsubs = []
     this.input.cancel()
@@ -451,11 +490,13 @@ export class App {
 
   private onTurn(team: TeamIndex, reason: TurnReason): void {
     const m = this.match
-    this.ui.setTurn(team, this.teams, TURN_LABEL[reason])
+    if (reason === 'normal' || reason === 'bonus' || reason === 'kickoff' || reason === 'halftime') this.restartZone = null
+    const isThrowIn = this.restartZone?.kind === 'throwin' && this.restartZone.team === team
+    this.ui.setTurn(team, this.teams, isThrowIn ? 'take the throw-in' : TURN_LABEL[reason])
     const color = this.teams[team].primary
     if (reason === 'bonus') { this.ui.banner('BONUS FLICK!', color, 1100); this.crowd.chant() }
     if (reason === 'corner' || reason === 'goalkick' || reason === 'freekick' || reason === 'penalty' || reason === 'offside' || reason === 'dropball') {
-      this.ui.banner(TURN_LABEL[reason].toUpperCase(), color, 1100)
+      if (!this.restartZone || this.restartZone.team !== team) this.ui.restartBanner(`${TURN_LABEL[reason]} · ${this.teams[team].name}`, color)
       if (reason === 'corner' || reason === 'goalkick') {
         // Always explain who gave it away — this is a rule call, not just colour commentary.
         const other = this.teams[team === 0 ? 1 : 0].name
@@ -469,6 +510,10 @@ export class App {
       }
       if (reason === 'penalty' || reason === 'dropball') this.say(reason, { team: this.teams[team].name }, 2)
     }
+    if (isThrowIn && this.restartZone) {
+      const other = this.teams[team === 0 ? 1 : 0].name
+      this.ui.caption(`${other} touched it last over the sideline · throw-in to ${this.teams[team].name}.`, 2600)
+    }
     if (reason === 'keeper' && m?.shootout) {
       const so = m.shootout
       const kicker = so.kicker
@@ -477,8 +522,170 @@ export class App {
     }
     this.refreshMeters()
     this.refreshActionButton()
+    if (reason === 'penalty' && m?.ruleset.hiddenPenalties && (this.mode === 'quick' || this.mode === 'tournament')) this.beginHiddenPenalty(team)
     if (this.mode === 'ai' && team === 1 && this.live) this.scheduleAi(m)
     else this.cancelAi()
+  }
+
+  private beginHiddenPenalty(kicker: TeamIndex): void {
+    const m = this.match
+    if (!m || m.shootout || m.takerId < 0 || m.keeperId < 0) return
+    const keeperTeam = (1 - kicker) as TeamIndex
+    this.hiddenPenalty = new HiddenPenalty(kicker, keeperTeam, m.takerId, m.keeperId, keeperTeam as 0 | 1, FOOTBALL.hiddenPenaltyPhaseMs)
+    this.penaltyTimerSecond = -1
+    this.showPenaltyCover()
+    this.refreshActionButton()
+  }
+
+  private showPenaltyCover(): void {
+    const p = this.hiddenPenalty
+    if (!p) return
+    if (p.stage === 'cover-keeper') {
+      this.ui.showPenaltyCover(
+        `${this.teams[p.keeperTeam].name}: choose the keeper spot`,
+        `Pass the phone to the keeper's player. Set the keeper, then tap Lock Keeper. The shooter cannot see the locked spot.`,
+        'Keeper is ready', this.teams[p.keeperTeam].primary,
+      )
+    } else if (p.stage === 'cover-shooter') {
+      this.ui.showPenaltyCover(
+        `${this.teams[p.kicker].name}: take the shot`,
+        `Keeper choice is locked and hidden. Pass the phone to the shooter, then stage one flick and tap Lock Shot.`,
+        'Shooter is ready', this.teams[p.kicker].primary,
+      )
+    }
+  }
+
+  private dismissPenaltyCover(): void {
+    const p = this.hiddenPenalty
+    if (!p || !p.dismissCover()) return
+    this.ui.modal(null)
+    if (this.match) this.match.paused = false
+    this.penaltyTimerSecond = -1
+    if (p.stage === 'keeper') {
+      this.ui.setTurn(p.keeperTeam, this.teams, 'choose the keeper spot')
+      this.ui.restartBanner('Keeper chooses · hidden from shooter', this.teams[p.keeperTeam].primary)
+    } else {
+      const m = this.match
+      if (m) this.placeKeeperNeutral(p)
+      this.ui.setTurn(p.kicker, this.teams, 'stage a shot, then lock it')
+      this.ui.restartBanner('Shooter chooses · keeper choice stays hidden', this.teams[p.kicker].primary)
+    }
+    this.refreshActionButton()
+  }
+
+  private keeperDragTarget(): { x: number; y: number; radius: number } | null {
+    const p = this.hiddenPenalty
+    const m = this.match
+    if (!p || p.stage !== 'keeper' || !m || m.phase !== 'aim' || m.paused) return null
+    const body = m.world.caps[p.keeperId]
+    return body ? { x: body.position.x, y: body.position.y, radius: m.world.capInfo(p.keeperId).type.radius } : null
+  }
+
+  private movePenaltyKeeper(position: Vec): void {
+    const p = this.hiddenPenalty
+    const m = this.match
+    if (!p || p.stage !== 'keeper' || !m) return
+    const radius = m.world.capInfo(p.keeperId).type.radius
+    const legal = legalKeeperPosition(position, p.end, radius, m.ruleset.keeperMayLeaveLine)
+    m.world.place(m.world.caps[p.keeperId], legal, 0)
+  }
+
+  private placeKeeperNeutral(p: HiddenPenalty): void {
+    const m = this.match
+    if (!m) return
+    const radius = m.world.capInfo(p.keeperId).type.radius
+    const line = p.end === 0 ? 0 : PITCH.width
+    const neutral = legalKeeperPosition({ x: line, y: PITCH.height / 2 }, p.end, radius, m.ruleset.keeperMayLeaveLine)
+    m.world.place(m.world.caps[p.keeperId], neutral, 0)
+  }
+
+  private lockPenaltyKeeper(): void {
+    const p = this.hiddenPenalty
+    const m = this.match
+    if (!p || !m || p.stage !== 'keeper') return
+    const body = m.world.caps[p.keeperId]
+    const radius = m.world.capInfo(p.keeperId).type.radius
+    const choice = legalKeeperPosition({ x: body.position.x, y: body.position.y }, p.end, radius, m.ruleset.keeperMayLeaveLine)
+    if (!p.lockKeeper(choice)) return
+    // Hide the committed position from the shooter until their own shot is locked.
+    this.placeKeeperNeutral(p)
+    this.keeperInput.cancel()
+    this.penaltyTimerSecond = -1
+    this.showPenaltyCover()
+    this.refreshActionButton()
+  }
+
+  private lockPenaltyShot(): void {
+    const p = this.hiddenPenalty
+    if (!p || !p.lockShot()) return
+    this.revealPenalty()
+  }
+
+  private forfeitPenalty(): void {
+    if (this.hiddenPenalty?.forfeit()) this.revealPenalty()
+  }
+
+  private penaltyStraightShot(p: HiddenPenalty): { direction: Vec; power: number } {
+    return { direction: { x: p.end === 0 ? -1 : 1, y: 0 }, power: FOOTBALL.timeoutStraightPower }
+  }
+
+  private advanceHiddenPenalty(dtMs: number): void {
+    const p = this.hiddenPenalty
+    if (!p) return
+    if (p.stage === 'keeper' || p.stage === 'shooter') {
+      const seconds = Math.max(0, Math.ceil((p.timeoutMs - p.elapsedMs) / 1000))
+      if (seconds !== this.penaltyTimerSecond) {
+        this.penaltyTimerSecond = seconds
+        this.ui.setPenaltyTimer(seconds)
+      }
+      if (!p.tick(dtMs)) return
+      if (p.stage === 'keeper') {
+        const target = this.keeperDragTarget()
+        p.timeoutKeeper(target ? { x: target.x, y: target.y } : { x: p.end === 0 ? 0 : PITCH.width, y: PITCH.height / 2 })
+        this.lockPenaltyKeeperAfterTimeout(p)
+      } else {
+        if (p.timeoutShooter(this.match?.ruleset.penaltyTimeout ?? 'straight', this.penaltyStraightShot(p))) this.revealPenalty()
+      }
+    }
+  }
+
+  private lockPenaltyKeeperAfterTimeout(p: HiddenPenalty): void {
+    this.placeKeeperNeutral(p)
+    this.keeperInput.cancel()
+    this.penaltyTimerSecond = -1
+    this.showPenaltyCover()
+    this.refreshActionButton()
+  }
+
+  private revealPenalty(): void {
+    const p = this.hiddenPenalty
+    const m = this.match
+    if (!p || !m || p.stage !== 'reveal') return
+    this.ui.setPenaltyTimer(null)
+    this.penaltyTimerSecond = -1
+    const keeperPosition = p.keeperPosition ?? legalKeeperPosition({ x: p.end === 0 ? 0 : PITCH.width, y: PITCH.height / 2 }, p.end, m.world.capInfo(p.keeperId).type.radius, m.ruleset.keeperMayLeaveLine)
+    m.world.place(m.world.caps[p.keeperId], keeperPosition, 0)
+    const choice = p.forfeited ? null : p.committedShot ?? this.penaltyStraightShot(p)
+    const keeperSide = keeperPosition.y < PITCH.height / 2 - 8 ? 'upper side' : keeperPosition.y > PITCH.height / 2 + 8 ? 'lower side' : 'centre'
+    const shotSide = choice ? choice.direction.y < -0.2 ? 'upper side' : choice.direction.y > 0.2 ? 'lower side' : 'straight' : null
+    const text = p.forfeited
+      ? `${this.teams[p.kicker].name} forfeited the kick. The keeper committed ${keeperSide}.`
+      : `Keeper: ${keeperSide}. Shot: ${shotSide}. Now see if the cap can beat the gloves.`
+    this.ui.showPenaltyReveal(text, this.teams[p.kicker].primary)
+    this.keeperInput.cancel()
+    window.clearTimeout(this.penaltyRevealTimer)
+    this.penaltyRevealTimer = window.setTimeout(() => {
+      if (this.hiddenPenalty !== p || this.match !== m) return
+      this.hiddenPenalty = null
+      p.finish()
+      this.ui.modal(null)
+      m.paused = false
+      this.restartZone = null
+      this.ui.setTurn(p.kicker, this.teams, 'take the penalty')
+      const shot = choice ?? { direction: { x: p.end === 0 ? 1 : -1, y: 0 }, power: FOOTBALL.forfeitPower }
+      m.tryFlick(p.takerId, shot.direction, shot.power)
+      this.refreshActionButton()
+    }, 900)
   }
 
   private onKick(team: TeamIndex, scored: boolean, saved: boolean): void {
@@ -493,9 +700,19 @@ export class App {
   private onWhistle(w: Whistle | { kind: 'dropball' }): void {
     this.audio.whistle()
     if (w.kind === 'dropball') { this.ui.banner('DEAD BALL', '#f5d000', 1200); return }
+    if (w.kind === 'throwin') return
     this.crowd.ooh()
     this.ui.banner(w.kind === 'foul' ? 'FOUL!' : 'OFFSIDE!', '#f5d000', 1200)
     this.say(w.kind === 'foul' ? 'foul' : 'offside', {}, 3)
+  }
+
+  private onRestart(r: { kind: Outcome['kind']; team: TeamIndex; at: Vec | null; end: 0 | 1 | null; retake: boolean }): void {
+    this.restartZone = r
+    const labels: Record<Outcome['kind'], string> = {
+      normal: 'Play on', bonus: 'Bonus flick', freekick: 'Free kick', penalty: 'Penalty', corner: 'Corner',
+      goalkick: r.retake ? 'Goal-kick retake' : 'Goal kick', throwin: 'Throw-in', dropball: 'Dropped ball',
+    }
+    this.ui.restartBanner(`${labels[r.kind]} · ${this.teams[r.team].name}`, this.teams[r.team].primary)
   }
 
   private onPlayEvent(e: TrackerEvent): void {
@@ -508,7 +725,43 @@ export class App {
     }
     if (e.type === 'boardBonus') { this.ui.banner('OFF THE BOARDS!', this.teams[e.team].primary, 1000); this.say('bonus', { team: this.teams[e.team].name, cap: this.capName(e.capId) }, 2) }
     if (e.type === 'byline') { this.lastOut = { x: e.info.at.x, y: e.info.at.y }; this.outMark = { ...this.lastOut, t0: performance.now() }; this.audio.whistle(false) }
+    if (e.type === 'throwin') { this.lastOut = { ...e.at }; this.outMark = { ...this.lastOut, t0: performance.now() }; this.audio.whistle(false) }
     if (e.type === 'boardHit') this.particles.dust(e.at.x, e.at.y, 6, SURFACES[this.surfaceOfMatch()].dustColor, 0.8, 4)
+  }
+
+  private drawRestartZone(ctx: CanvasRenderingContext2D): void {
+    const z = this.restartZone
+    const m = this.match
+    if (!z || !m || (m.phase !== 'aim' && m.phase !== 'reset')) return
+    ctx.save()
+    ctx.globalAlpha = 0.16
+    ctx.fillStyle = this.teams[z.team].primary
+    ctx.strokeStyle = '#fff2bd'
+    ctx.lineWidth = 4
+    ctx.setLineDash([12, 9])
+    if (z.kind === 'penalty' && z.end !== null) {
+      const y = (PITCH.height - PITCH.penaltyBox.width) / 2
+      const x = z.end === 0 ? 0 : PITCH.width - PITCH.penaltyBox.depth
+      ctx.fillRect(x, y, PITCH.penaltyBox.depth, PITCH.penaltyBox.width)
+      ctx.globalAlpha = 0.8
+      ctx.beginPath(); ctx.arc(z.at?.x ?? PITCH.penaltySpot, z.at?.y ?? PITCH.height / 2, 30, 0, Math.PI * 2); ctx.stroke()
+    } else if (z.kind === 'goalkick' && z.end !== null) {
+      const y = (PITCH.height - PITCH.penaltyBox.width) / 2
+      ctx.fillRect(z.end === 0 ? 0 : PITCH.width - PITCH.penaltyBox.depth, y, PITCH.penaltyBox.depth, PITCH.penaltyBox.width)
+      ctx.globalAlpha = 0.75
+      ctx.strokeRect(z.end === 0 ? 0 : PITCH.width - PITCH.goalBox.depth, (PITCH.height - PITCH.goalBox.width) / 2, PITCH.goalBox.depth, PITCH.goalBox.width)
+    } else if (z.kind === 'corner' && z.end !== null) {
+      const x = z.end === 0 ? 0 : PITCH.width - 130
+      const y = (z.at?.y ?? PITCH.height / 2) < PITCH.height / 2 ? 0 : PITCH.height - 130
+      ctx.fillRect(x, y, 130, 130)
+    } else if (z.at) {
+      ctx.globalAlpha = 0.1
+      ctx.beginPath(); ctx.arc(z.at.x, z.at.y, m.ruleset.wallDistance, 0, Math.PI * 2); ctx.fill()
+      ctx.globalAlpha = 0.85
+      ctx.beginPath(); ctx.arc(z.at.x, z.at.y, 28, 0, Math.PI * 2); ctx.stroke()
+    }
+    ctx.setLineDash([])
+    ctx.restore()
   }
 
   /** Chalk ring + cross where the ball went out, so the corner / goal kick call is readable. */
@@ -647,6 +900,15 @@ export class App {
   private refreshActionButton(): void {
     const m = this.match
     if (!m || !this.live) { this.ui.html('[data-powerbtn]', ''); return }
+    if (this.hiddenPenalty?.stage === 'keeper') {
+      this.ui.html('[data-powerbtn]', '<button class="powerbtn" data-action="keeper-lock">LOCK KEEPER</button>')
+      return
+    }
+    if (this.hiddenPenalty?.stage === 'shooter') {
+      const ready = !!this.hiddenPenalty.candidateShot
+      this.ui.html('[data-powerbtn]', `<div class="penalty-lock-actions"><button class="powerbtn" data-action="shot-lock" ${ready ? '' : 'disabled'}>LOCK SHOT</button><button class="powerbtn penalty-concede" data-action="penalty-concede">CONCEDE</button></div>`)
+      return
+    }
     if (m.keeperSetting) {
       this.ui.html('[data-powerbtn]', '<button class="powerbtn" data-action="keeperready">LOCK KEEPER</button>')
       return
@@ -722,9 +984,17 @@ export class App {
   }
 
   // ---------------------------------------------------------------- input
+  private localRuleInputActive(): boolean {
+    const m = this.match
+    return !!m && this.live && (this.mode === 'quick' || this.mode === 'tournament')
+      && m.phase === 'aim' && !m.paused && !this.ui.modalOpen && m.ruleset.freeKicks
+      && !this.hiddenPenalty && this.ui.root.dataset.current === 'hud'
+  }
+
   private pickable() {
     const m = this.match
     if (!m || !this.live || m.phase !== 'aim' || m.paused || this.ui.modalOpen || this.ui.root.dataset.current !== 'hud' || this.isAiTurn(m)) return []
+    if (this.hiddenPenalty && this.hiddenPenalty.stage !== 'shooter') return []
     if (this.mode === 'online' && (!this.onlineState?.ready || this.onlineClient?.state !== 'open' || this.onlineTeam !== m.team)) return []
     return m.world.caps
       .map((b, id) => ({ b, id, info: m.world.capInfo(id) }))
@@ -765,6 +1035,11 @@ export class App {
       case 'preset':
         this.settings.ruleset = arg
         this.settings.flags = {}
+        saveSettings(this.settings)
+        this.openSetup()
+        break
+      case 'penalty-timeout':
+        if (arg === 'straight' || arg === 'forfeit') this.settings.penaltyTimeout = arg
         saveSettings(this.settings)
         this.openSetup()
         break
@@ -810,6 +1085,13 @@ export class App {
       case 'tune': this.tune.toggle(); break
       case 'arm': this.match?.toggleArm(); this.refreshActionButton(); break
       case 'keeperready': this.match?.keeperReady(); break
+      case 'penalty-cover': this.dismissPenaltyCover(); break
+      case 'keeper-lock': this.lockPenaltyKeeper(); break
+      case 'shot-lock': this.lockPenaltyShot(); break
+      case 'penalty-concede': this.forfeitPenalty(); break
+      case 'pause': if (this.match && this.match.phase !== 'over') this.ui.modal('pause'); break
+      case 'resume': this.ui.modal(null); break
+      case 'concede-match': this.confirmAction = 'concede'; this.ui.$('[data-confirm-title]').textContent = 'Concede the match?'; this.ui.$('[data-confirm-text]').textContent = 'The other player will be awarded the win.'; this.ui.modal('confirm'); break
       case 'skipreplay': this.endReplay(); break
       case 'online-copy': void this.copyOnlineInvite(); break
       case 'online-leave': this.toMenu(); break
@@ -820,6 +1102,12 @@ export class App {
         if (!this.match) return
         if (this.mode === 'online') { this.ui.caption('Leave this room to start a new match.', 2500); break }
         this.ui.modal(null)
+        window.clearTimeout(this.penaltyRevealTimer)
+        this.penaltyRevealTimer = 0
+        this.hiddenPenalty?.finish()
+        this.hiddenPenalty = null
+        this.ui.setPenaltyTimer(null)
+        this.restartZone = null
         this.replay = null
         this.goalHoldMs = -1
         this.ui.$('[data-replay]').hidden = true
@@ -841,7 +1129,14 @@ export class App {
         else if (arg === 'copy') void this.copyOnlineInvite()
         break
       case 'rules': this.ui.modal('rules'); break
-      case 'closemodal': this.ui.modal(null); break
+      case 'closemodal': this.confirmAction = null; this.ui.modal(null); break
+      case 'confirm-yes': {
+        const action = this.confirmAction
+        this.confirmAction = null
+        this.ui.modal(null)
+        if (action === 'concede' && this.match && this.mode !== 'online') this.match.concede((1 - this.match.team) as TeamIndex)
+        break
+      }
       case 'sound':
         this.settings.sound = !this.settings.sound
         this.audio.setEnabled(this.settings.sound)
@@ -860,7 +1155,7 @@ export class App {
   }
 
   private go(): void {
-    const rules = buildRuleset(this.settings.ruleset, this.settings.flags)
+    const rules = buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout)
     if (this.mode === 'quick') this.startMatch(rules, this.surface)
     else if (this.mode === 'ai') this.startMatch(rules, this.surface, { vsAi: true })
     else if (this.mode === 'shootout') this.startMatch(rules, this.surface, { shootout: true })
@@ -887,7 +1182,7 @@ export class App {
     this.currentTie = tie
     this.pendingTie = null
     const teams = resolveKits(tour.crews[tie.home], tour.crews[tie.away])
-    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags), this.surface, { teams })
+    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { teams })
     this.ui.banner(tie.label.toUpperCase(), '#151515', 1300)
   }
 
@@ -897,7 +1192,7 @@ export class App {
     if (!tour || !pend || pend.tie.home === null || pend.tie.away === null) return
     this.currentTie = pend.tie
     const teams = resolveKits(tour.crews[pend.tie.home], tour.crews[pend.tie.away])
-    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags), this.surface, { shootout: true, teams })
+    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { shootout: true, teams })
   }
 
   private toMenu(): void {
@@ -910,7 +1205,7 @@ export class App {
     this.ui.$('[data-online-leave]').hidden = true
     this.ui.modal(null)
     this.ui.html('[data-win-actions]', '<button class="btn" data-action="restart">Rematch</button><button class="btn ghost" data-action="newmatch">New match</button>')
-    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags), this.surface, { live: false })
+    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { live: false })
     this.renderStartMenu()
     this.ui.show('start')
   }
@@ -940,6 +1235,7 @@ export class App {
       this.replay.t += s * FX.replaySpeed
       if (this.replay.t >= this.replay.clip.duration) this.endReplay()
     } else {
+      this.advanceHiddenPenalty(dt)
       this.advanceAi(m, dt)
       m.update(dt)
     }
@@ -971,8 +1267,8 @@ export class App {
       caps,
       ball,
       aim: this.aim,
-      pickTeam: this.live && m.phase === 'aim' && !m.paused ? m.team : null,
-      pickable: this.live && m.phase === 'aim' ? (id: number) => !this.isAiTurn(m) && m.canPick(id) : undefined,
+      pickTeam: this.live && m.phase === 'aim' && !m.paused && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') ? m.team : null,
+      pickable: this.live && m.phase === 'aim' ? (id: number) => !this.isAiTurn(m) && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') && m.canPick(id) : undefined,
       powerShot: m.armed !== null && m.armed === m.team && m.phase === 'aim',
       activeCap: m.activeCap,
       replay: !!rp,
@@ -982,7 +1278,7 @@ export class App {
 
   /** Live handler counts — used by the smoke test to prove nothing stacks up across matches. */
   debugCounts(): Record<string, number> {
-    return { input: activeInputHandlers(), matchListeners: this.match?.events.listenerCount() ?? 0, matchSubs: this.matchUnsubs.length, overlays: activeOverlays(), overlaySubs: this.tune.listenerCount }
+    return { input: activeInputHandlers(), penaltyInput: activePenaltyInputHandlers(), matchListeners: this.match?.events.listenerCount() ?? 0, matchSubs: this.matchUnsubs.length, overlays: activeOverlays(), overlaySubs: this.tune.listenerCount }
   }
 
   destroy(): void {
@@ -990,6 +1286,8 @@ export class App {
     this.endMatch()
     this.crowd.stop()
     this.input.detach()
+    this.keeperInput.detach()
+    this.ruleGestureGuard.detach()
     this.tune.destroy()
     this.resizeObs.disconnect()
     this.abort.abort()
@@ -1019,10 +1317,15 @@ export function rulesHtml(r: Ruleset, surface: SurfaceId, shootout = false): str
   if (r.boardBonus) on.push('<p><b>Boards are a teammate.</b> Bounce the ball off a board and onto one of your own caps and you get a bonus flick.</p>')
   if (r.combos.enabled) on.push(`<p><b>Pass combos.</b> Every time the ball goes from one of your caps to another, your meter fills. ${r.combos.passesForPowerShot} passes charge a power shot (×${r.combos.powerMultiplier} punch) — arm it with the button before you flick. The other team touching the ball resets your chain.</p>`)
   if (r.freeKicks) on.push(`<p><b>Free kicks.</b> If your flicked cap hits an opponent before it touches the ball, it's a foul: free kick where it happened, defenders back ${Math.round(r.wallDistance)} units.${r.penalties ? ' In your own box it\'s a penalty.' : ''}</p>`)
+  if (r.advantage) on.push('<p><b>Advantage.</b> After a foul, play continues briefly if the fouled team can attack. If they do not make clear forward progress, the referee brings play back for the free kick or penalty.</p>')
   if (r.corners) on.push(r.outBy === 'lastTouch'
     ? '<p><b>Corners &amp; goal kicks.</b> The ball smashing into the board beside a goal is out (soft rolls play on); the ref marks the spot. Real-football rule: the team that touched it <b>last</b> gives it up. Last touch by the defending team: corner to the attackers. Last touch by the attackers: goal kick.</p>'
     : '<p><b>Corners &amp; goal kicks.</b> The ball smashing into the board beside a goal is out (soft rolls play on); the ref marks the spot. Whoever\'s <b>flick</b> sent it out gives it up — deflections don\'t count. Your flick sends it into <b>their</b> end: goal kick to them, everyone back in formation. Your flick sends it into <b>your own</b> end: corner to them, both teams line up in the box.</p>')
   if (r.offside) on.push('<p><b>Offside.</b> A team-mate past the ball and the second-last defender (in the other half) when you flick is offside if the ball reaches them.</p>')
+  if (r.sidelineThrowIns) on.push('<p><b>Throw-ins.</b> A firm ball hit into a long-side board is out. Last touch decides it: the other team takes a throw-in, with opponents moved back the restart distance.</p>')
+  if (r.goalKickRestriction) on.push('<p><b>Goal kicks.</b> Opponents start outside the penalty area. The kick must leave the box; if it settles without clearing, the goal kick is retaken.</p>')
+  if (r.keeperBox) on.push('<p><b>Keeper box.</b> A goalkeeper pushed outside its own penalty area is returned inside after the play settles.</p>')
+  if (r.hiddenPenalties) on.push('<p><b>Hidden penalties.</b> On local two-player penalties, the keeper and shooter choose in separate covered turns. Neither sees the other choice until both lock in. Each choice has a countdown; shooter timeout follows your selected Straight Shot or Forfeit rule.</p>')
   const types = r.capTypes ? `<h3>Your crew</h3><div class="types">${(['keeper', 'defender', 'winger', 'striker'] as const).map(k => `<div class="type"><b>${CAP_TYPES[k].label}</b>${CAP_TYPES[k].blurb}</div>`).join('')}</div>` : ''
   return `
     <p><b>${esc(r.name)}</b> on <b>${esc(s.name)}</b> — ${esc(s.blurb)}</p>

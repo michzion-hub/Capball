@@ -1,4 +1,5 @@
 import { PITCH } from '../config/tuning'
+import { FOOTBALL } from '../config/football'
 import type { Ruleset } from '../config/rulesets'
 import type { BodyTag, CapInfo, Contact, TeamIndex, Vec } from '../physics/world'
 import { attackDir, defendingTeam, otherTeam } from './rules'
@@ -28,6 +29,7 @@ export function offsideCaps(team: TeamIndex, caps: CapPos[], ball: Vec, flickerI
 export type Whistle =
   | { kind: 'foul'; at: Vec; offender: TeamIndex; victimCap: number }
   | { kind: 'offside'; at: Vec; offender: TeamIndex; capId: number }
+  | { kind: 'throwin'; at: Vec; lastTeam: TeamIndex; next: TeamIndex }
 
 export interface ByLine { end: 0 | 1; lastTeam: TeamIndex; at: Vec }
 
@@ -38,6 +40,7 @@ export type Outcome =
   | { kind: 'penalty'; next: TeamIndex; end: 0 | 1 }
   | { kind: 'corner'; next: TeamIndex; end: 0 | 1; at: Vec }
   | { kind: 'goalkick'; next: TeamIndex; end: 0 | 1; at: Vec }
+  | { kind: 'throwin'; next: TeamIndex; lastTeam: TeamIndex; at: Vec }
   /** Stuck ball: the ref drops it back into play at `at`. */
   | { kind: 'dropball'; next: TeamIndex; at: Vec }
 
@@ -49,6 +52,7 @@ export function outcomeReason(o: Outcome): TurnReason {
     case 'penalty': return 'penalty'
     case 'corner': return 'corner'
     case 'goalkick': return 'goalkick'
+    case 'throwin': return 'freekick'
     case 'dropball': return 'dropball'
   }
 }
@@ -70,6 +74,7 @@ export type TrackerEvent =
   | { type: 'powerReady'; team: TeamIndex }
   | { type: 'boardBonus'; team: TeamIndex; capId: number }
   | { type: 'byline'; info: ByLine }
+  | { type: 'throwin'; at: Vec; lastTeam: TeamIndex; next: TeamIndex }
   | { type: 'boardHit'; at: Vec }
 
 const capOf = (t: BodyTag): CapInfo | null => (t.kind === 'cap' ? t.cap : null)
@@ -84,6 +89,10 @@ export class PlayTracker {
   private flickerFirstContactDone: boolean
   whistle: Whistle | null = null
   byline: ByLine | null = null
+  private throwIn: { at: Vec; lastTeam: TeamIndex; next: TeamIndex } | null = null
+  private pendingAdvantage: Extract<Whistle, { kind: 'foul' }> | null = null
+  private advantageTouch = false
+  advantageApplied = false
   private ballOffBoard = false
   bonus: { capId: number } | null = null
   private readonly offside: Set<number>
@@ -105,6 +114,8 @@ export class PlayTracker {
   /** Drain events produced since the last call. */
   take(): TrackerEvent[] { return this.events.splice(0) }
 
+  get deferredFoul(): Extract<Whistle, { kind: 'foul' }> | null { return this.pendingAdvantage }
+
   onContact(c: Contact): void {
     const a = c.a, b = c.b
     const at = { x: c.x, y: c.y }
@@ -116,8 +127,10 @@ export class PlayTracker {
       if (other.kind === 'ball') this.flickerFirstContactDone = true
       else if (other.kind === 'cap') {
         this.flickerFirstContactDone = true
-        if (other.cap.team !== this.flicker.team && !this.flickerTouchedBall && this.rules.freeKicks && !this.whistle && c.impact > 0.4) {
-          this.blow({ kind: 'foul', at, offender: this.flicker.team, victimCap: other.cap.id })
+        if (other.cap.team !== this.flicker.team && !this.flickerTouchedBall && this.rules.freeKicks && !this.whistle && !this.pendingAdvantage && c.impact > FOOTBALL.foulImpactMin) {
+          const foul = { kind: 'foul' as const, at, offender: this.flicker.team, victimCap: other.cap.id }
+          if (this.rules.advantage) this.pendingAdvantage = foul
+          else this.blow(foul)
         }
       }
     }
@@ -135,6 +148,12 @@ export class PlayTracker {
         this.byline = { end: ballWith.end as 0 | 1, lastTeam: by, at }
         this.events.push({ type: 'byline', info: this.byline })
       }
+      if (ballWith.board === 'side' && this.rules.sidelineThrowIns && c.impact >= this.rules.outMinImpact && !this.throwIn && !this.whistle) {
+        const lastTeam = this.possession.lastCap?.team ?? this.flicker.team
+        this.throwIn = { at, lastTeam, next: otherTeam(lastTeam) }
+        this.events.push({ type: 'throwin', at, lastTeam, next: otherTeam(lastTeam) })
+        if (!this.pendingAdvantage) this.blow({ kind: 'throwin', at, lastTeam, next: otherTeam(lastTeam) })
+      }
       if (ballWith.board === 'side' || (ballWith.board === 'byline' && !out)) {
         if (c.impact > 0.5) {
           this.ballOffBoard = true
@@ -146,6 +165,7 @@ export class PlayTracker {
 
   private ballTouchedBy(cap: CapInfo, at: Vec): void {
     const p = this.possession
+    if (this.pendingAdvantage && cap.team === otherTeam(this.pendingAdvantage.offender)) this.advantageTouch = true
     // Offside: ball reaches a team-mate who was offside when the flick was made.
     if (!this.whistle && cap.team === this.flicker.team && cap.id !== this.flicker.id && this.offside.has(cap.id)) {
       this.blow({ kind: 'offside', at, offender: cap.team, capId: cap.id })
@@ -182,10 +202,11 @@ export class PlayTracker {
   }
 
   /** Called once everything has settled (and no goal was scored). */
-  resolve(): Outcome {
+  resolve(ballPosition?: Vec): Outcome {
     const team = this.flicker.team
     const w = this.whistle
     if (w) {
+      if (w.kind === 'throwin') return { kind: 'throwin', next: w.next, lastTeam: w.lastTeam, at: w.at }
       const victim = otherTeam(w.offender)
       if (w.kind === 'foul') {
         const defendedEnd: 0 | 1 = w.offender === 0 ? 0 : 1
@@ -194,12 +215,26 @@ export class PlayTracker {
       }
       return { kind: 'freekick', next: victim, at: w.at, reason: 'offside' }
     }
+    if (this.pendingAdvantage) {
+      const victim = otherTeam(this.pendingAdvantage.offender)
+      const progress = (x: number) => victim === 0 ? x : PITCH.width - x
+      const gained = this.advantageTouch && this.possession.lastCap?.team === victim && !!ballPosition
+        && progress(ballPosition.x) - progress(this.pendingAdvantage.at.x) >= FOOTBALL.advantageGain
+      if (gained) this.advantageApplied = true
+      else {
+        const foul = this.pendingAdvantage
+        const defendedEnd: 0 | 1 = foul.offender
+        if (this.rules.penalties && inPenaltyBox(foul.at, defendedEnd)) return { kind: 'penalty', next: victim, end: defendedEnd }
+        return { kind: 'freekick', next: victim, at: foul.at, reason: 'freekick' }
+      }
+    }
     if (this.byline) {
       const { end, lastTeam, at } = this.byline
       const defender = defendingTeam(end)
       if (lastTeam === defender) return { kind: 'corner', next: otherTeam(defender), end, at }
       return { kind: 'goalkick', next: defender, end, at }
     }
+    if (this.throwIn) return { kind: 'throwin', ...this.throwIn }
     if (this.bonus) return { kind: 'bonus', next: team }
     return { kind: 'normal', next: otherTeam(team) }
   }

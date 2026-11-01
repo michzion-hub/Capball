@@ -1,4 +1,5 @@
 import { CAP_TYPES, BALL, DEADBALL, PITCH } from '../config/tuning'
+import { FOOTBALL } from '../config/football'
 import type { CapTypeId } from '../config/tuning'
 import type { Ruleset } from '../config/rulesets'
 import type { TeamIndex, Vec } from '../physics/world'
@@ -11,17 +12,18 @@ export interface PieceCap { id: number; team: TeamIndex; slot: number; type: Cap
 
 const H = PITCH.height
 const W = PITCH.width
+const rOf = (c: PieceCap) => CAP_TYPES[c.type].radius
 
 /**
  * Where everything should slide to before a set piece. Returns targets for every cap (same order)
  * and the ball. Pure; positions only ever change between plays.
  */
 export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules: Ruleset): { caps: Vec[]; ball: Vec } | null {
-  if (o.kind === 'normal' || o.kind === 'bonus') return null
+  if (o.kind === 'normal' || o.kind === 'bonus') return keeperBoxTargets(caps, _ball, rules)
   const kicker = o.next
   const targets: Vec[] = caps.map(c => ({ x: c.x, y: c.y }))
   let ballAt: Vec
-  const r = (c: PieceCap) => CAP_TYPES[c.type].radius
+  const r = rOf
 
   if (o.kind === 'penalty') {
     const lineX = o.end === 0 ? 0 : W
@@ -30,27 +32,29 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
     const defenders = o.end === 0 ? 0 : 1
     const boxDepth = PITCH.penaltyBox.depth
     const placed: Circle[] = [{ x: ballAt.x, y: ballAt.y, r: BALL.radius }]
-    // Keeper on the line, striker (or first active attacker) behind the ball.
     const keeper = caps.find(c => c.team === defenders && c.slot === 0 && c.active)
     const taker = caps.find(c => c.team === kicker && c.slot === 4 && c.active) ?? caps.find(c => c.team === kicker && c.active)
-    if (keeper) { targets[keeper.id] = { x: lineX + inward * (r(keeper) + 3), y: H / 2 }; placed.push({ ...targets[keeper.id], r: r(keeper) }) }
-    // Taker stands further from the goal than the ball (toward the pitch centre).
-    if (taker) { targets[taker.id] = { x: ballAt.x + inward * (BALL.radius + r(taker) + 26), y: H / 2 }; placed.push({ ...targets[taker.id], r: r(taker) }) }
-    // Everyone else outside the box.
-    for (const c of caps) {
-      if (!c.active || c === keeper || c === taker) continue
-      let p = { x: c.x, y: c.y }
-      const insideX = o.end === 0 ? p.x < boxDepth + r(c) + 6 : p.x > W - boxDepth - r(c) - 6
-      if (insideX) p = { x: lineX + inward * (boxDepth + r(c) + 10 + Math.random() * 0), y: p.y }
-      p = findFreeSpot(p, r(c), placed, 6)
+    if (keeper) {
+      targets[keeper.id] = { x: lineX + inward * (r(keeper) + FOOTBALL.keeperLineInset), y: H / 2 }
+      placed.push({ ...targets[keeper.id], r: r(keeper) })
+    }
+    if (taker) {
+      targets[taker.id] = { x: ballAt.x + inward * (BALL.radius + r(taker) + FOOTBALL.penaltyTakerGap), y: H / 2 }
+      placed.push({ ...targets[taker.id], r: r(taker) })
+    }
+    // Every other cap starts beyond the box line and on the midfield side of the ball.
+    const others = caps.filter(c => c.active && c !== keeper && c !== taker)
+    others.forEach((c, index) => {
+      const x = lineX + inward * (boxDepth + r(c) + FOOTBALL.penaltyRetreatInset)
+      const y = H * (index + 1) / (others.length + 1)
+      const p = findFreeSpot({ x, y }, r(c), placed, FOOTBALL.restartInset / 4)
       targets[c.id] = p
       placed.push({ ...p, r: r(c) })
-    }
+    })
     return { caps: targets, ball: ballAt }
   }
 
   if (o.kind === 'dropball') {
-    // Dropped ball: nobody gets a free run at it — every cap is moved clear of the drop spot.
     ballAt = o.at
     const clear = DEADBALL.clearRadius
     const placed: Circle[] = [{ x: ballAt.x, y: ballAt.y, r: clear }]
@@ -69,30 +73,71 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
     }
     return { caps: targets, ball: ballAt }
   }
+
   if (o.kind === 'corner') return cornerSetup(o.end, o.at.y < H / 2 ? -1 : 1, kicker, caps, rules)
-  // Ball spot for the other set pieces.
-  if (o.kind === 'freekick') {
-    ballAt = clampToPitch(o.at, BALL.radius + 14)
-  } else {
-    // goal kick: edge of the goal box on the side it went out
+
+  if (o.kind === 'throwin') {
+    ballAt = clampToPitch(o.at, BALL.radius + FOOTBALL.restartInset / 2)
+    const placed: Circle[] = [{ ...ballAt, r: BALL.radius }]
+    const taker = caps.find(c => c.team === kicker && c.slot === 3 && c.active)
+      ?? caps.find(c => c.team === kicker && c.slot === 4 && c.active)
+      ?? caps.find(c => c.team === kicker && c.active)
+    const side = ballAt.y < H / 2 ? 1 : -1
+    if (taker) {
+      const p = clampToPitch({ x: ballAt.x, y: ballAt.y + side * (BALL.radius + r(taker) + FOOTBALL.throwInTakerGap) }, r(taker) + 4)
+      targets[taker.id] = findFreeSpot(p, r(taker), placed, 3)
+      placed.push({ ...targets[taker.id], r: r(taker) })
+    }
+    // Nearby teammates keep their shape, but cannot start on the ball or the thrower's cap.
+    for (const c of caps) {
+      if (!c.active || c.team !== kicker || c === taker) continue
+      const p = findFreeSpot({ x: c.x, y: c.y }, r(c), placed, 3)
+      targets[c.id] = p
+      placed.push({ ...p, r: r(c) })
+    }
+    // The opposing team must retreat the same set-piece distance.
+    const wall: Circle = { ...ballAt, r: rules.wallDistance }
+    for (const c of caps) {
+      if (!c.active || c.team === kicker) continue
+      const d = Math.hypot(c.x - ballAt.x, c.y - ballAt.y)
+      let p = { x: c.x, y: c.y }
+      if (d < rules.wallDistance + r(c)) {
+        const ux = d > 1e-3 ? (c.x - ballAt.x) / d : -side
+        const uy = d > 1e-3 ? (c.y - ballAt.y) / d : 0
+        p = { x: ballAt.x + ux * (rules.wallDistance + r(c) + 2), y: ballAt.y + uy * (rules.wallDistance + r(c) + 2) }
+      }
+      p = findFreeSpot(p, r(c), [...placed, wall], 4)
+      targets[c.id] = p
+      placed.push({ ...p, r: r(c) })
+    }
+    return { caps: targets, ball: ballAt }
+  }
+
+  if (o.kind === 'freekick') ballAt = clampToPitch(o.at, BALL.radius + FOOTBALL.restartInset / 2)
+  else {
+    // Goal kick: restart inside the six-yard goal area and reset the shape.
     const x = o.end === 0 ? PITCH.goalBox.depth : W - PITCH.goalBox.depth
-    const y = o.at.y < H / 2 ? H / 2 - 60 : H / 2 + 60
+    const y = o.at.y < H / 2 ? H / 2 - PITCH.goalBox.width / 4 : H / 2 + PITCH.goalBox.width / 4
     ballAt = { x, y }
-    // Goal kick = fresh shape: every cap slides back to its original formation spot.
     const placed: Circle[] = []
     for (const c of caps) {
       if (!c.active) continue
-      const p = findFreeSpot(basePosition(c.team, c.slot), r(c), placed, 4)
+      let p = basePosition(c.team, c.slot)
+      if (rules.goalKickRestriction && c.team !== kicker) {
+        // Opponents line up just outside the penalty-area boundary, not inside the box.
+        const edge = o.end === 0 ? PITCH.penaltyBox.depth : W - PITCH.penaltyBox.depth
+        p = { x: edge + (o.end === 0 ? 1 : -1) * (r(c) + FOOTBALL.penaltyRetreatInset), y: H * (placed.length + 1) / (caps.length + 1) }
+      }
+      p = findFreeSpot(p, r(c), placed, 4)
       targets[c.id] = p
       placed.push({ ...p, r: r(c) })
     }
     ballAt = findFreeSpot(ballAt, BALL.radius, placed, 3)
     return { caps: targets, ball: ballAt }
   }
-  // Ball must not overlap any cap (kicking team's caps can stay put; they're the ones pushed if needed).
-  ballAt = findFreeSpot(ballAt, BALL.radius, caps.filter(c => c.active).map(c => ({ x: c.x, y: c.y, r: r(c) })), 3)
 
-  // Defending caps must retreat to the wall distance.
+  // Ball must not overlap any cap. Defenders retreat to the configured distance.
+  ballAt = findFreeSpot(ballAt, BALL.radius, caps.filter(c => c.active).map(c => ({ x: c.x, y: c.y, r: r(c) })), 3)
   const wall = rules.wallDistance
   const placed: Circle[] = [{ x: ballAt.x, y: ballAt.y, r: BALL.radius }]
   for (const c of caps) if (c.active && c.team === kicker) placed.push({ x: c.x, y: c.y, r: r(c) })
@@ -102,17 +147,41 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
     const d = Math.hypot(c.x - ballAt.x, c.y - ballAt.y)
     let p = { x: c.x, y: c.y }
     if (d < wall + r(c)) {
-      // Push straight away from the ball (toward their own goal if exactly on top).
       const ux = d > 1e-3 ? (c.x - ballAt.x) / d : dirKick
       const uy = d > 1e-3 ? (c.y - ballAt.y) / d : 0
       p = { x: ballAt.x + ux * (wall + r(c) + 2), y: ballAt.y + uy * (wall + r(c) + 2) }
     }
-    const obstacles = [...placed, { x: ballAt.x, y: ballAt.y, r: wall }]
-    p = findFreeSpot(p, r(c), obstacles, 4)
+    p = findFreeSpot(p, r(c), [...placed, { x: ballAt.x, y: ballAt.y, r: wall }], 4)
     targets[c.id] = p
     placed.push({ ...p, r: r(c) })
   }
   return { caps: targets, ball: ballAt }
+}
+
+/** Correct a goalkeeper that has been pushed outside its own penalty area, only after play settles. */
+function keeperBoxTargets(caps: PieceCap[], ball: Vec, rules: Ruleset): { caps: Vec[]; ball: Vec } | null {
+  if (!rules.keeperBox) return null
+  const targets: Vec[] = caps.map(c => ({ x: c.x, y: c.y }))
+  let changed = false
+  for (const c of caps) {
+    if (!c.active || c.slot !== 0 || inOwnPenaltyArea(c)) continue
+    const end = c.team as 0 | 1
+    const inward = end === 0 ? 1 : -1
+    const edgeX = end === 0 ? PITCH.penaltyBox.depth : W - PITCH.penaltyBox.depth
+    const half = PITCH.penaltyBox.width / 2
+    const y = Math.min(H / 2 + half - rOf(c) - FOOTBALL.keeperBoxInset, Math.max(H / 2 - half + rOf(c) + FOOTBALL.keeperBoxInset, c.y))
+    const p = { x: edgeX - inward * (rOf(c) + FOOTBALL.penaltyRetreatInset), y }
+    targets[c.id] = p
+    changed = true
+  }
+  return changed ? { caps: targets, ball: { ...ball } } : null
+}
+
+function inOwnPenaltyArea(c: PieceCap): boolean {
+  const end = c.team as 0 | 1
+  const half = PITCH.penaltyBox.width / 2
+  const inY = c.y >= H / 2 - half && c.y <= H / 2 + half
+  return inY && (end === 0 ? c.x <= PITCH.penaltyBox.depth : c.x >= W - PITCH.penaltyBox.depth)
 }
 
 /**
@@ -120,38 +189,31 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
  * Slots: 0 keeper, 1–2 defenders, 3 winger, 4 striker. `s` = +1 bottom corner, -1 top corner.
  */
 const CORNER_ATTACK: Record<number, [number, number]> = {
-  4: [112, -30],   // striker: penalty spot, far side
-  2: [58, 70],     // defender: attacking the near post
-  1: [190, 15],    // defender: edge of the box for the knock-down
+  4: [112, -30], 2: [58, 70], 1: [190, 15],
 }
 const CORNER_DEFEND: Record<number, [number, number]> = {
-  0: [0, 18],      // keeper: on the line, shading the near post (depth = line + radius)
-  1: [34, 98],     // defender: near post
-  2: [84, -12],    // defender: goal-side of the striker
-  3: [160, 55],    // winger: edge of the box, blocking the short ball
-  4: [500, -70],   // striker: halfway line, waiting for the counter
+  0: [0, 18], 1: [34, 98], 2: [84, -12], 3: [160, 55], 4: [500, -70],
 }
 
 function cornerSetup(end: 0 | 1, s: -1 | 1, kicker: TeamIndex, caps: PieceCap[], rules: Ruleset): { caps: Vec[]; ball: Vec } {
-  const r = (c: PieceCap) => CAP_TYPES[c.type].radius
+  const r = rOf
   const lineX = end === 0 ? 0 : W
   const inward = end === 0 ? 1 : -1
   const at = (depth: number, off: number): Vec => ({ x: lineX + inward * depth, y: H / 2 + s * off })
   const targets: Vec[] = caps.map(c => ({ x: c.x, y: c.y }))
   const active = caps.filter(c => c.active)
   const taker = active.find(c => c.team === kicker && c.slot === 3) ?? active.find(c => c.team === kicker && c.slot !== 0) ?? active.find(c => c.team === kicker)
-  // Ball near the corner flag, far enough in that the taker fits behind it aiming at the penalty spot.
   const aimAt = at(PITCH.penaltySpot, 0)
-  let ball = at(BALL.radius + 6, H / 2 - BALL.radius - 6)
+  let ball = at(BALL.radius + FOOTBALL.restartInset / 2, H / 2 - BALL.radius - FOOTBALL.restartInset / 2)
   let takerAt: Vec | null = null
   if (taker) {
     const tr = r(taker)
-    for (let inset = BALL.radius + 6; inset < 140; inset += 3) {
+    for (let inset = BALL.radius + FOOTBALL.restartInset / 2; inset < 140; inset += 3) {
       const b = at(inset, H / 2 - inset)
       const dx = aimAt.x - b.x
       const dy = aimAt.y - b.y
       const d = Math.hypot(dx, dy)
-      const gap = BALL.radius + tr + 3
+      const gap = BALL.radius + tr + FOOTBALL.restartInset / 4
       const t = { x: b.x - (dx / d) * gap, y: b.y - (dy / d) * gap }
       if (t.x >= tr + 2 && t.x <= W - tr - 2 && t.y >= tr + 2 && t.y <= H - tr - 2) { ball = b; takerAt = t; break }
     }
@@ -163,18 +225,16 @@ function cornerSetup(end: 0 | 1, s: -1 | 1, kicker: TeamIndex, caps: PieceCap[],
     placed.push({ ...p, r: r(c) })
   }
   if (taker && takerAt) { targets[taker.id] = takerAt; placed.push({ ...takerAt, r: r(taker) }) }
-  // Attackers crowd the box; their keeper stays home.
   for (const c of active) {
     if (c.team !== kicker || c === taker) continue
     const spot = CORNER_ATTACK[c.slot]
     put(c, spot ? at(spot[0], spot[1]) : basePosition(c.team, c.slot))
   }
-  // Defenders mark, all at least the wall distance from the ball.
   const wall: Circle = { x: ball.x, y: ball.y, r: rules.wallDistance }
   for (const c of active) {
     if (c.team === kicker) continue
     const spot = CORNER_DEFEND[c.slot] ?? [120, 0]
-    const depth = c.slot === 0 ? r(c) + 3 : spot[0]
+    const depth = c.slot === 0 ? r(c) + FOOTBALL.keeperLineInset : spot[0]
     put(c, at(depth, spot[1]), [wall])
   }
   return { caps: targets, ball }

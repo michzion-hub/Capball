@@ -18,6 +18,7 @@ export class UI {
   private abort = new AbortController()
   private bannerTimer = 0
   private captionTimer = 0
+  private restartTimer = 0
 
   constructor(root: HTMLElement, private readonly handlers: UIHandlers) {
     this.root = root
@@ -47,8 +48,11 @@ export class UI {
   clearOverlays(): void {
     window.clearTimeout(this.bannerTimer)
     window.clearTimeout(this.captionTimer)
+    window.clearTimeout(this.restartTimer)
     this.$('[data-banner]').classList.remove('show')
     this.$('[data-caption]').classList.remove('show')
+    this.$('[data-restart-banner]').classList.remove('show')
+    this.setPenaltyTimer(null)
   }
 
   modal(name: string | null): void {
@@ -120,6 +124,40 @@ export class UI {
     this.captionTimer = window.setTimeout(() => c.classList.remove('show'), ms)
   }
 
+  restartBanner(text: string, color: string, ms = 1800): void {
+    const b = this.$('[data-restart-banner]')
+    b.textContent = text
+    b.style.setProperty('--team', color)
+    b.classList.remove('show'); void b.offsetWidth; b.classList.add('show')
+    window.clearTimeout(this.restartTimer)
+    this.restartTimer = window.setTimeout(() => b.classList.remove('show'), ms)
+  }
+
+  setPenaltyTimer(seconds: number | null): void {
+    const el = this.$('[data-penalty-timer]')
+    el.hidden = seconds === null
+    if (seconds !== null) {
+      el.textContent = `LOCK IN · ${seconds}`
+      el.classList.toggle('urgent', seconds <= 3)
+    } else el.classList.remove('urgent')
+  }
+
+  showPenaltyCover(title: string, body: string, button: string, color: string): void {
+    const modal = this.$('[data-modal="penalty"]')
+    modal.style.setProperty('--team', color)
+    modal.querySelector('[data-penalty-title]')!.textContent = title
+    modal.querySelector('[data-penalty-copy]')!.textContent = body
+    modal.querySelector('[data-action="penalty-cover"]')!.textContent = button
+    this.modal('penalty')
+  }
+
+  showPenaltyReveal(text: string, color: string): void {
+    const modal = this.$('[data-modal="penalty-reveal"]')
+    modal.style.setProperty('--team', color)
+    modal.querySelector('[data-penalty-reveal-copy]')!.textContent = text
+    this.modal('penalty-reveal')
+  }
+
   showWinner(title: string, sub: string, color: string): void {
     const w = this.$('[data-modal="winner"]')
     w.style.setProperty('--team', color)
@@ -134,6 +172,7 @@ export class UI {
     this.abort.abort()
     window.clearTimeout(this.bannerTimer)
     window.clearTimeout(this.captionTimer)
+    window.clearTimeout(this.restartTimer)
     this.root.innerHTML = ''
   }
 }
@@ -170,6 +209,7 @@ const TEMPLATE = /* html */ `
   </header>
   <div class="meters" data-meters></div>
   <nav class="hud-tools">
+    <button class="tool" data-action="pause" title="Pause">Pause</button>
     <button class="tool" data-action="restart" data-local-restart title="Restart this match">Restart</button>
     <button class="tool" data-action="newmatch" title="Back to the menu">New match</button>
     <button class="tool" data-action="online-copy" data-online-copy hidden>Invite link</button>
@@ -184,6 +224,8 @@ const TEMPLATE = /* html */ `
 
 <div class="banner" data-banner></div>
 <div class="caption" data-caption></div>
+<div class="restart-banner" data-restart-banner aria-live="polite"></div>
+<div class="penalty-timer" data-penalty-timer hidden aria-live="polite"></div>
 
 <div class="modal" data-modal="rules" role="dialog" aria-label="Rules">
   <div class="sheet">
@@ -214,6 +256,36 @@ const TEMPLATE = /* html */ `
     <div class="win-actions">
       <button class="btn" data-action="confirm-yes">Yes</button>
       <button class="btn ghost" data-action="closemodal">No</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal penalty-cover-modal" data-modal="penalty" role="dialog" aria-modal="true" aria-label="Pass the phone">
+  <div class="sheet penalty-cover">
+    <span class="kicker">Hidden penalty · pass the device</span>
+    <h2 data-penalty-title></h2>
+    <p data-penalty-copy></p>
+    <button class="btn" data-action="penalty-cover">I'm ready</button>
+  </div>
+</div>
+
+<div class="modal penalty-cover-modal" data-modal="penalty-reveal" role="dialog" aria-modal="true" aria-label="Penalty choices revealed">
+  <div class="sheet penalty-cover">
+    <span class="kicker">Both choices locked</span>
+    <h2>The reveal</h2>
+    <p data-penalty-reveal-copy></p>
+  </div>
+</div>
+
+<div class="modal" data-modal="pause" role="dialog" aria-modal="true" aria-label="Match paused">
+  <div class="sheet">
+    <span class="kicker">Match paused</span>
+    <h2>Take a breather</h2>
+    <div class="win-actions">
+      <button class="btn" data-action="resume">Resume</button>
+      <button class="btn ghost" data-action="restart">Restart</button>
+      <button class="btn ghost" data-action="concede-match">Concede</button>
+      <button class="chip" data-action="newmatch">New match</button>
     </div>
   </div>
 </div>

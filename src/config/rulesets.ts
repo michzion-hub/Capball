@@ -1,3 +1,5 @@
+import type { PenaltyTimeoutAction } from './football'
+
 /**
  * Rulesets — swap a whole ruleset or tweak a single flag to try a new version of the game.
  * The rule engine (src/game/rules.ts) only ever reads these flags.
@@ -39,6 +41,20 @@ export interface Ruleset {
   spin: boolean
   /** A ball pinned against the boards that stays put for this many plays is dropped back in. 0 = never. */
   deadBallTurns: number
+  /** Side-line contact above outMinImpact is a throw-in to the team that did not touch last. */
+  sidelineThrowIns: boolean
+  /** Opponents stay outside the penalty area until a goal kick leaves it; otherwise retake. */
+  goalKickRestriction: boolean
+  /** Delay a foul whistle when the fouled team can retain a clearly better attacking position. */
+  advantage: boolean
+  /** Goalkeepers are returned to their own goal area between plays if pushed outside it. */
+  keeperBox: boolean
+  /** Local two-player hidden keeper/shooter commit–reveal for open-play penalties. */
+  hiddenPenalties: boolean
+  /** During hidden penalties, allow the keeper to move inside the six-yard goal area. */
+  keeperMayLeaveLine: boolean
+  /** Shooter timeout policy for hidden penalties. */
+  penaltyTimeout: PenaltyTimeoutAction
 }
 
 const base: Omit<Ruleset, 'id' | 'name' | 'blurb'> = {
@@ -56,6 +72,13 @@ const base: Omit<Ruleset, 'id' | 'name' | 'blurb'> = {
   deadBallTurns: 2,
   outMinImpact: 2,
   outBy: 'flick',
+  sidelineThrowIns: true,
+  goalKickRestriction: true,
+  advantage: true,
+  keeperBox: true,
+  hiddenPenalties: false,
+  keeperMayLeaveLine: false,
+  penaltyTimeout: 'straight',
 }
 
 export const RULESETS = {

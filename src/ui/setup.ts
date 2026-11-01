@@ -13,6 +13,12 @@ export const FLAG_DEFS = [
   { key: 'corners', label: 'Corners' },
   { key: 'freeKicks', label: 'Free kicks' },
   { key: 'penalties', label: 'Penalties' },
+  { key: 'sidelineThrowIns', label: 'Throw-ins' },
+  { key: 'goalKickRestriction', label: 'Goal-kick clearance' },
+  { key: 'advantage', label: 'Advantage' },
+  { key: 'keeperBox', label: 'Keeper stays in box' },
+  { key: 'hiddenPenalties', label: 'Hidden penalties' },
+  { key: 'keeperMayLeaveLine', label: 'Keeper may step off line' },
   { key: 'offside', label: 'Offside' },
   { key: 'halves', label: 'Timed halves' },
 ] as const
@@ -25,7 +31,7 @@ export function flagValue(r: Ruleset, k: FlagKey): boolean {
 }
 
 /** Preset + per-flag overrides → the ruleset actually played. */
-export function buildRuleset(presetId: string, overrides: Record<string, boolean>): Ruleset {
+export function buildRuleset(presetId: string, overrides: Record<string, boolean>, timeoutAction?: Ruleset['penaltyTimeout']): Ruleset {
   const p = getRuleset(presetId)
   const r: Ruleset = { ...p, combos: { ...p.combos }, halves: p.halves ? { ...p.halves } : null }
   for (const def of FLAG_DEFS) {
@@ -38,22 +44,30 @@ export function buildRuleset(presetId: string, overrides: Record<string, boolean
     } else r[def.key] = v
   }
   if (!r.freeKicks) r.penalties = false
+  if (timeoutAction) r.penaltyTimeout = timeoutAction
   const changed = FLAG_DEFS.some(d => overrides[d.key] !== undefined && overrides[d.key] !== flagValue(p, d.key))
   if (changed) r.name = `${p.name} (custom)`
   return r
 }
 
-export function setupHtml(o: { title: string; sub: string; presetId: string; overrides: Record<string, boolean>; surface: SurfaceId; showRules: boolean; goLabel: string; showAi?: boolean; aiLevel?: AiLevel }): string {
-  const r = buildRuleset(o.presetId, o.overrides)
+export function setupHtml(o: { title: string; sub: string; presetId: string; overrides: Record<string, boolean>; surface: SurfaceId; showRules: boolean; goLabel: string; showAi?: boolean; aiLevel?: AiLevel; penaltyTimeout?: Ruleset['penaltyTimeout']; allowHiddenPenalties?: boolean }): string {
+  const r = buildRuleset(o.presetId, o.overrides, o.penaltyTimeout)
   const presets = RULESET_ORDER.map(id => {
     const p = RULESETS[id]
     return `<button class="opt ${id === o.presetId ? 'is-on' : ''}" data-action="preset:${id}"><b>${esc(p.name)}</b><small>${esc(p.blurb)}</small></button>`
   }).join('')
   const flags = FLAG_DEFS.map(d => {
     const on = flagValue(r, d.key)
-    const disabled = d.key === 'penalties' && !r.freeKicks
+    const disabled = (d.key === 'penalties' && !r.freeKicks)
+      || (d.key === 'hiddenPenalties' && (!r.penalties || o.allowHiddenPenalties === false))
+      || (d.key === 'keeperMayLeaveLine' && !r.hiddenPenalties)
     return `<label><input type="checkbox" data-input="flag:${d.key}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''}/> ${d.label}</label>`
   }).join('')
+  const timeoutChoice = r.hiddenPenalties ? `<div class="penalty-options" aria-label="Penalty timeout action">
+    <span>On shooter timeout</span>
+    <button class="opt ${(o.penaltyTimeout ?? r.penaltyTimeout) === 'straight' ? 'is-on' : ''}" data-action="penalty-timeout:straight"><b>Straight shot</b><small>Default kick at goal</small></button>
+    <button class="opt ${(o.penaltyTimeout ?? r.penaltyTimeout) === 'forfeit' ? 'is-on' : ''}" data-action="penalty-timeout:forfeit"><b>Forfeit</b><small>Deliberate miss</small></button>
+  </div>` : ''
   const surfaces = (Object.keys(SURFACES) as SurfaceId[]).map(id => {
     const s = SURFACES[id]
     return `<button class="opt ${id === o.surface ? 'is-on' : ''}" data-action="surface:${id}"><b>${esc(s.name)}</b><small>${esc(s.blurb)}</small></button>`
@@ -70,6 +84,7 @@ export function setupHtml(o: { title: string; sub: string; presetId: string; ove
     ${o.showRules ? `
     <div class="opt-group"><label>Rules</label><div class="opts">${presets}</div>
       <div class="flags">${flags}</div>
+      ${timeoutChoice}
       <p class="sub" style="margin:8px 0 0;font-size:13px">${r.goalsToWin ? `First to ${r.goalsToWin}` : ''}${r.goalsToWin && r.halves ? ' · ' : ''}${r.halves ? `${r.halves.count} × ${Math.round(r.halves.seconds / 60)} min halves` : ''}${r.combos.enabled ? ` · ${r.combos.passesForPowerShot} passes = power shot` : ''}</p>
     </div>` : ''}
     <div class="opt-group"><label>Pitch</label><div class="opts">${surfaces}</div></div>

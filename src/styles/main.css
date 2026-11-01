@@ -14,7 +14,9 @@
   --hand: 'Permanent Marker', 'Comic Sans MS', cursive;
   --body: 'ManusCC0', system-ui, sans-serif;
   --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
   --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
 }
 
 * { box-sizing: border-box; }
@@ -36,7 +38,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  font-family: var(--display); font-size: 26px; letter-spacing: 1.5px; padding: 12px 26px 9px;
+  font-family: var(--display); font-size: 26px; letter-spacing: 1.5px; padding: 12px 26px 9px; min-height: 48px;
   background: var(--cap); color: #fff; border: 3px solid var(--ink); box-shadow: 5px 5px 0 var(--ink);
   transform: rotate(-1deg); transition: transform .12s, box-shadow .12s; text-shadow: 2px 2px 0 var(--ink);
 }
@@ -45,7 +47,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .btn.ghost { background: var(--paper); color: var(--ink); text-shadow: none; }
 .btn.small { font-size: 19px; padding: 8px 14px 6px; }
 .chip {
-  font-family: var(--hand); font-size: 15px; padding: 7px 14px; background: var(--paper); border: 2px solid var(--ink);
+  font-family: var(--hand); font-size: 15px; padding: 7px 14px; min-height: 44px; background: var(--paper); border: 2px solid var(--ink);
   transform: rotate(1.5deg); box-shadow: 3px 3px 0 var(--ink);
 }
 .chip:active { transform: rotate(1.5deg) translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
@@ -113,7 +115,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .hud-tools { position: absolute; right: 10px; bottom: calc(10px + var(--safe-b)); display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .tool {
   font-family: var(--hand); font-size: 14px; background: var(--paper); border: 2px solid var(--ink); padding: 6px 10px;
-  box-shadow: 3px 3px 0 rgba(0,0,0,.7); min-height: 36px;
+  box-shadow: 3px 3px 0 rgba(0,0,0,.7); min-height: 44px;
 }
 .tool:nth-child(odd) { transform: rotate(-2deg); }
 .tool:nth-child(even) { transform: rotate(1.5deg); }
@@ -128,6 +130,10 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .powerbtn-slot { position: absolute; left: 50%; bottom: calc(12px + var(--safe-b)); transform: translateX(-50%); }
 .powerbtn { font-family: var(--display); font-size: 22px; letter-spacing: 1px; background: #ffd23f; border: 3px solid var(--ink); padding: 6px 16px 3px; box-shadow: 4px 4px 0 var(--ink); }
 .powerbtn.armed { background: var(--cap); color: #fff; text-shadow: 2px 2px 0 var(--ink); animation: wiggle .25s infinite alternate; }
+.penalty-lock-actions { display: flex; justify-content: center; gap: 8px; }
+.penalty-lock-actions .powerbtn { min-height: 48px; }
+.powerbtn:disabled { opacity: .45; box-shadow: 1px 1px 0 var(--ink); cursor: not-allowed; }
+.powerbtn.penalty-concede { background: #f3eee2; color: var(--ink); text-shadow: none; font-size: 17px; }
 .replay-tag { position: absolute; top: calc(70px + var(--safe-t)); left: 50%; transform: translateX(-50%) rotate(-2deg); font-family: var(--display); font-size: 30px; color: #fff; background: #d6201a; border: 3px solid var(--ink); padding: 2px 14px 0; text-shadow: 2px 2px 0 var(--ink); }
 .replay-tag small { font-family: var(--hand); font-size: 12px; text-shadow: none; margin-left: 6px; }
 .replay-tag:not([hidden]) { animation: blink 1s steps(2) infinite; }
@@ -153,10 +159,28 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 }
 .caption::before { content: '🎙 '; }
 .caption.show { opacity: 1; transform: translateX(-50%) translateY(0) rotate(-1deg); }
+.restart-banner {
+  --team: #f60; position: fixed; z-index: 8; top: calc(72px + var(--safe-t)); left: 50%;
+  transform: translate(-50%, -12px); opacity: 0; pointer-events: none; white-space: nowrap;
+  max-width: calc(100vw - 24px - var(--safe-l) - var(--safe-r)); overflow: hidden; text-overflow: ellipsis;
+  font: 17px var(--display); letter-spacing: .04em; color: #fff; background: var(--team); border: 2px solid var(--ink);
+  padding: 5px 12px; box-shadow: 3px 3px 0 var(--ink); transition: opacity .18s, transform .18s;
+}
+.restart-banner.show { opacity: 1; transform: translate(-50%, 0); }
+.penalty-timer {
+  position: fixed; z-index: 8; left: 50%; top: calc(132px + var(--safe-t)); transform: translateX(-50%);
+  font: 18px var(--display); letter-spacing: .08em; color: var(--ink); background: #ffd23f; border: 3px solid var(--ink);
+  padding: 4px 14px; box-shadow: 4px 4px 0 var(--ink); pointer-events: none;
+}
+.penalty-timer.urgent { background: #e52b24; color: #fff; animation: wiggle .18s infinite alternate; }
 
 /* ---------- modals ---------- */
 .modal { position: fixed; inset: 0; display: none; place-items: center; background: rgba(10,10,12,.62); padding: 16px; touch-action: pan-y; }
 .modal.is-active { display: grid; }
+.penalty-cover-modal { background: rgba(10,10,12,.97); padding: calc(16px + var(--safe-t)) calc(16px + var(--safe-r)) calc(16px + var(--safe-b)) calc(16px + var(--safe-l)); }
+.penalty-cover { --team: var(--cap); border-top: 8px solid var(--team); text-align: center; width: min(100%, 500px); }
+.penalty-cover .kicker { font: 14px var(--hand); color: var(--team); text-transform: uppercase; }
+.penalty-cover p { font-size: 17px; line-height: 1.45; }
 .sheet {
   position: relative; background: var(--paper); border: 3px solid var(--ink); box-shadow: 10px 10px 0 rgba(0,0,0,.6); padding: 28px 26px 22px;
   max-width: 560px; width: 100%; max-height: calc(100vh - 40px); overflow-y: auto; transform: rotate(.8deg); animation: pop .22s cubic-bezier(.3,1.6,.5,1);
@@ -184,7 +208,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 .opt-group > label { font-family: var(--hand); font-size: 16px; display: block; margin-bottom: 6px; }
 .opts { display: flex; flex-wrap: wrap; gap: 8px; }
 .opt {
-  border: 2px solid var(--ink); background: #fff; padding: 7px 11px 6px; text-align: left; max-width: 260px; box-shadow: 3px 3px 0 rgba(0,0,0,.35);
+  border: 2px solid var(--ink); background: #fff; padding: 7px 11px 6px; min-height: 44px; text-align: left; max-width: 260px; box-shadow: 3px 3px 0 rgba(0,0,0,.35);
 }
 .opt b { font-family: var(--display); font-weight: 400; font-size: 19px; letter-spacing: .5px; display: block; }
 .opt small { font-size: 12px; opacity: .8; display: block; line-height: 1.3; }
@@ -231,7 +255,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
   .slip-name { font-size: 15px; max-width: 28vw; }
   .slip-score { font-size: 30px; }
   .slip-cap { display: none; }
-  .tool { font-size: 12px; padding: 4px 8px; min-height: 32px; }
+  .tool { font-size: 12px; padding: 4px 8px; min-height: 44px; }
   .turn-who { font-size: 14px; } .turn-what { font-size: 12px; }
   .start-wrap, .setup-wrap, .editor-wrap, .bracket-wrap { padding: 28px 18px 20px; }
   .btn { font-size: 22px; }
@@ -239,7 +263,7 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 @media (max-height: 480px) {
   .slip-score { font-size: 28px; }
   .slip-name { font-size: 15px; }
-  .tool { font-size: 12px; padding: 3px 8px; min-height: 30px; }
+  .tool { font-size: 12px; padding: 3px 8px; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 
@@ -291,6 +315,16 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
   .tune { top: auto; bottom: 0; left: 0; right: 0; width: auto; height: 38dvh; max-height: 38dvh; border-radius: 10px 10px 0 0; border-width: 2px 0 0; }
   .tstats { grid-template-columns: 1fr 1fr; }
   .tstats div { grid-column: span 1; }
+  .scorebar { left: var(--safe-l); right: var(--safe-r); padding-left: 6px; padding-right: 6px; }
+  .hud-tools { left: calc(6px + var(--safe-l)); right: calc(6px + var(--safe-r)); bottom: var(--safe-b); justify-content: center; flex-wrap: nowrap; gap: 4px; }
+  .hud-tools .tool { flex: 1 1 0; min-width: 0; min-height: 44px; padding: 3px 4px; font-size: 11px; white-space: nowrap; }
+  .meters { top: calc(82px + var(--safe-t)); bottom: auto; left: calc(6px + var(--safe-l)); gap: 4px; }
+  .meter { padding: 2px 5px; font-size: 11px; }
+  .powerbtn-slot { bottom: calc(54px + var(--safe-b)); }
+  .powerbtn { min-height: 44px; font-size: 17px; padding: 5px 12px; }
+  .restart-banner { top: calc(88px + var(--safe-t)); font-size: 15px; }
+  .penalty-timer { top: calc(146px + var(--safe-t)); }
+  .modal { padding: calc(12px + var(--safe-t)) calc(12px + var(--safe-r)) calc(12px + var(--safe-b)) calc(12px + var(--safe-l)); }
 }
 .tool[hidden] { display: none !important; }
 

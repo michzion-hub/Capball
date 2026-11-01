@@ -1,5 +1,6 @@
 import { TEAM_DEFAULTS } from '../config/tuning'
 import type { AiLevel } from '../config/tuning'
+import type { PenaltyTimeoutAction } from '../config/football'
 import { PATTERNS } from '../render/capArt'
 import type { Pattern, TeamDesign } from '../render/capArt'
 
@@ -18,6 +19,7 @@ export interface Settings {
   surface: string
   flags: Record<string, boolean>
   aiLevel: AiLevel
+  penaltyTimeout: PenaltyTimeoutAction
 }
 
 const DEFAULT_CAP_NAMES: [string[], string[]] = [
@@ -31,7 +33,7 @@ export function defaultTeam(i: 0 | 1): TeamDesign {
 }
 
 export function defaultSettings(): Settings {
-  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium' }
+  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium', penaltyTimeout: 'straight' }
 }
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -70,6 +72,7 @@ export function loadSettings(storage: Pick<Storage, 'getItem'> | null = safeStor
       surface: typeof p.surface === 'string' ? p.surface : d.surface,
       flags: p.flags && typeof p.flags === 'object' ? Object.fromEntries(Object.entries(p.flags).filter(([, v]) => typeof v === 'boolean')) : {},
       aiLevel: p.aiLevel === 'easy' || p.aiLevel === 'hard' ? p.aiLevel : 'medium',
+      penaltyTimeout: p.penaltyTimeout === 'forfeit' ? 'forfeit' : 'straight',
     }
   } catch {
     return d

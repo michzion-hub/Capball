@@ -373,6 +373,57 @@ try {
   if (counts3.input !== 1) throw new Error(`input handlers stacked: ${JSON.stringify(counts3)}`)
   await desk.close()
 
+  // ---------- Local hidden penalty commit–reveal ----------
+  const hiddenCtx = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  const hiddenPage = await open(hiddenCtx)
+  await hiddenPage.click('[data-action="mode:quick"]')
+  await hiddenPage.waitForSelector('[data-screen="setup"].is-active')
+  await hiddenPage.click('[data-input="flag:hiddenPenalties"]')
+  await hiddenPage.waitForFunction(() => document.querySelector('input[data-input="flag:hiddenPenalties"]')?.checked)
+  await hiddenPage.click('[data-screen="setup"] [data-action="go"]')
+  await hiddenPage.waitForSelector('[data-screen="hud"].is-active')
+  await hiddenPage.evaluate(() => {
+    const a = window.__capball
+    window.__hiddenFlicks = 0
+    a.match.events.on('flick', () => { window.__hiddenFlicks++ })
+    if (!a.match.awardInputFoul({ x: 30, y: 310 })) throw new Error('penalty-rule test call rejected')
+  })
+  await hiddenPage.waitForFunction(() => window.__capball.hiddenPenalty?.stage === 'cover-keeper', null, { timeout: 10000 })
+  await hiddenPage.click('[data-modal="penalty"] [data-action="penalty-cover"]')
+  const keeperId = await hiddenPage.evaluate(() => window.__capball.hiddenPenalty.keeperId)
+  const keeperBefore = await hiddenPage.evaluate(id => window.__capball.match.world.caps[id].position.y, keeperId)
+  const keeperPoint = await capScreen(hiddenPage, keeperId)
+  await hiddenPage.mouse.move(keeperPoint.x, keeperPoint.y)
+  await hiddenPage.mouse.down()
+  await hiddenPage.mouse.move(keeperPoint.x, keeperPoint.y - 60, { steps: 6 })
+  await hiddenPage.mouse.up()
+  const keeperMoved = await hiddenPage.evaluate(id => window.__capball.match.world.caps[id].position.y, keeperId)
+  if (!(keeperMoved < keeperBefore - 20)) throw new Error(`hidden keeper could not move: ${keeperBefore} → ${keeperMoved}`)
+  await hiddenPage.click('[data-action="keeper-lock"]')
+  await hiddenPage.waitForFunction(() => window.__capball.hiddenPenalty?.stage === 'cover-shooter')
+  await hiddenPage.click('[data-modal="penalty"] [data-action="penalty-cover"]')
+  const lockedKeeper = await hiddenPage.evaluate(() => ({
+    committed: window.__capball.hiddenPenalty.keeperPosition,
+    visible: window.__capball.match.world.caps[window.__capball.hiddenPenalty.keeperId].position,
+  }))
+  if (Math.abs(lockedKeeper.visible.y - 310) > 2 || Math.abs(lockedKeeper.committed.y - 310) < 20) throw new Error(`keeper lock was not hidden from shooter: ${JSON.stringify(lockedKeeper)}`)
+  const takerId = await hiddenPage.evaluate(() => window.__capball.hiddenPenalty.takerId)
+  const stagedBall = await hiddenPage.evaluate(() => ({ ...window.__capball.match.world.ball.position }))
+  await mouseFlick(hiddenPage, takerId, 110, 0)
+  const staged = await hiddenPage.evaluate(() => ({
+    phase: window.__capball.hiddenPenalty?.stage,
+    candidate: window.__capball.hiddenPenalty?.candidateShot,
+    committed: window.__capball.hiddenPenalty?.committedShot,
+    flicks: window.__hiddenFlicks,
+    ball: { ...window.__capball.match.world.ball.position },
+  }))
+  if (staged.phase !== 'shooter' || !staged.candidate || staged.committed || staged.flicks !== 0 || staged.ball.x !== stagedBall.x || staged.ball.y !== stagedBall.y) throw new Error(`staged penalty became visible/executed early: ${JSON.stringify(staged)}`)
+  await hiddenPage.click('[data-action="shot-lock"]')
+  await hiddenPage.waitForSelector('[data-modal="penalty-reveal"].is-active')
+  await hiddenPage.waitForFunction(() => window.__capball.hiddenPenalty === null && window.__hiddenFlicks === 1, null, { timeout: 5000 })
+  await hiddenPage.screenshot({ path: `${out}/28-hidden-penalty.png` })
+  await hiddenCtx.close()
+
   // ---------- Phase 3: offline install ----------
   const off = await browser.newContext({ viewport: { width: 900, height: 600 } })
   const op = await open(off)

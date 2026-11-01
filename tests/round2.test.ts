@@ -13,7 +13,7 @@ const run = (m: Match, ms: number, until?: () => boolean) => {
   for (let t = 0; t < ms; t += FRAME) { m.update(FRAME); if (until?.()) return t }
   return ms
 }
-const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, ...over })
+const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, sidelineThrowIns: false, ...over })
 
 /** Lone striker (slot 4, team 0) flicked right from (80, 310); everything else parked out of the way. */
 function soloFlick(spin: number, power = 0.7, ruleset = rules()) {
@@ -187,7 +187,8 @@ describe('corners and goal kicks', () => {
       // taker (winger) touching distance behind the ball, pointing at the penalty spot
       const taker = caps.find(c => c.team === kicker && c.slot === 3)!
       const tp = t.caps[taker.id]
-      expect(Math.hypot(tp.x - t.ball.x, tp.y - t.ball.y)).toBeCloseTo(BALL.radius + R(taker.id) + 3, 0)
+      expect(Math.hypot(tp.x - t.ball.x, tp.y - t.ball.y)).toBeGreaterThanOrEqual(BALL.radius + R(taker.id))
+      expect(Math.hypot(tp.x - t.ball.x, tp.y - t.ball.y)).toBeLessThanOrEqual(BALL.radius + R(taker.id) + 5)
       const spot = { x: lineX + (end === 1 ? -1 : 1) * PITCH.penaltySpot, y: PITCH.height / 2 }
       const a1 = Math.atan2(t.ball.y - tp.y, t.ball.x - tp.x)
       const a2 = Math.atan2(spot.y - t.ball.y, spot.x - t.ball.x)

@@ -20,7 +20,7 @@ const BALL: BodyTag = { kind: 'ball' }
 const SIDE: BodyTag = { kind: 'static', board: 'side', end: -1 }
 const BYLINE = (end: 0 | 1): BodyTag => ({ kind: 'static', board: 'byline', end })
 const hit = (a: BodyTag, b: BodyTag, x = 500, y = 300, impact = 5): Contact => ({ a, b, x, y, impact })
-const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, ...over })
+const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, sidelineThrowIns: false, ...over })
 const tracker = (flicker: CapInfo, r = rules(), pos = newPossession(), offside = new Set<number>()) =>
   new PlayTracker(flicker, r, pos, { touchingBallAtFlick: false, offsideAtFlick: offside })
 
@@ -174,10 +174,11 @@ describe('set pieces', () => {
     expect(t.caps[4].x).toBeLessThan(t.ball.x)
     for (const c of caps) if (c.id !== 5 && c.id !== 4) expect(inPenaltyBox(t.caps[c.id], 1)).toBe(false)
   })
-  it('goal kick: every cap slides back to its original formation, ball clear of caps', () => {
+  it('goal kick: kicking side resets to formation, opponents stay outside the box', () => {
     const t = setPieceTargets({ kind: 'goalkick', next: 0, end: 0, at: { x: -5, y: 100 } }, caps, { x: 0, y: 0 }, rules())!
-    for (const c of caps) expect(t.caps[c.id]).toEqual(basePosition(c.team, c.slot))
-    expect(t.ball.x).toBeLessThan(PITCH.width / 4)
+    for (const c of caps.filter(c => c.team === 0)) expect(t.caps[c.id]).toEqual(basePosition(c.team, c.slot))
+    for (const c of caps.filter(c => c.team === 1)) expect(t.caps[c.id].x).toBeGreaterThan(PITCH.penaltyBox.depth)
+    expect(t.ball.x).toBeLessThanOrEqual(PITCH.goalBox.depth)
     for (const c of caps) expect(Math.hypot(t.caps[c.id].x - t.ball.x, t.caps[c.id].y - t.ball.y)).toBeGreaterThan(22 + 12)
   })
 })
@@ -215,7 +216,7 @@ describe('cap types & surfaces (real physics)', () => {
 
 describe('match integration (real physics)', () => {
   it('ball bounced off the board back onto your own cap gives a bonus flick', () => {
-    const m = new Match({ ruleset: RULESETS.street, surface: 'park' })
+    const m = new Match({ ruleset: { ...RULESETS.street, sidelineThrowIns: false }, surface: 'park' })
     m.world.caps.forEach((b, i) => m.world.place(b, { x: 150 + i * 75, y: 560 }))
     m.world.place(m.world.ball, { x: 500, y: 90 })
     m.world.place(m.world.caps[4], { x: 500, y: 150 })

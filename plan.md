@@ -54,3 +54,7 @@ Candidates: Photocopied street-zine flyer (p=0.07) · 1970s sticker-album nostal
 - **Brand Voice**: cheeky touchline banter. "Flick it like you mean it." / "That cap's going home in a bin bag."
 - **Wordmark & Logo**: CAPBALL in Bangers with the A replaced by a crimped bottle cap.
 - **Signature Brand Color**: Cap Orange #FF5A1F.
+
+
+## Current request — phone-first football rules and local hidden penalties
+Keep the existing Matter.js world, input/flick mechanics and `TurnMachine` implementation unchanged. Add rule decisions as pure game logic, restart positions through the existing between-play placement/tween path, and mobile presentation through DOM overlays plus render-only rule-zone overlays. Keep all new distances and durations in named `src/config` constants. Support line-outs, restarts, fouls/advantage, keeper restrictions, goal-kick clearance/retake and local penalty commit–reveal. Hidden penalty choices are deliberately local-only; do not transmit a keeper or shooter choice in the online protocol. The existing standard physics shot remains the only way a penalty is executed. Keep controls accessible in portrait view, use safe-area insets, and cover the screen during device handoffs. Extend pure rule/state tests and existing browser smoke coverage; only publish source after tests and a clean Vite build pass.

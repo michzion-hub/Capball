@@ -35,6 +35,12 @@ A ball wedged in a corner, or pinned against the boards by a cap, that hasn't mo
 
 With corners on, the ball is out only when it hits the end board at least as hard as `ruleset.outMinImpact` (default 2). Who gives it away is set by `ruleset.outBy`. The default, `'flick'`, means the team whose flick sent the ball out loses it, and deflections don't count: send it into the opponents' end and they get a goal kick; send it into your own end and they get a corner. Proper Football uses `'lastTouch'`, the real-football rule. When the ball goes out the ref whistles, marks the spot with a chalk X, and the caption states the call. Softer rolls bounce back into play like any other board. The threshold is also on the tuning overlay under *Rules*. In a corner (`cornerSetup` in `game/setpieces.ts`), the winger stands behind the ball at the flag, aimed at the penalty spot. The striker and two defenders go to the far post, near post and edge of the box, and the keeper stays home. The defending keeper takes the line, the two defenders take the near post and goal side, the winger goes to the edge of the box, and the striker waits on halfway. Every defender stays at least the wall distance from the ball, and no caps overlap.
 
+### Phone-first rules and hidden penalties
+
+The default ruleset also enables throw-ins, goal-kick clearance, advantage and keeper-box limits. A firm ball hit into a long-side board is a throw-in for the team that did not touch it last; its taker is placed beside the ball and opponents are moved back. A goal kick resets the kicking side to formation while the other side waits outside the penalty area. The ball must clear that area before an opponent can enter; if it settles inside without clearing, the kick is retaken. A goalkeeper pushed out of its own penalty area is returned inside only after the play settles. Advantage is kept only when the fouled team touches the ball, retains the last touch and makes meaningful forward progress; otherwise the free kick or penalty is brought back.
+
+Turn on **Hidden penalties** in Quick Match or Tournament setup for a local pass-the-device commit–reveal. The keeper chooses along the goal line (or inside the goal area if enabled), locks the position, and the next player receives an opaque handoff cover. The shooter stages one normal drag-back flick and locks it; only then are both choices revealed and the flick enters the existing physics simulation. The staged direction and power remain local and are not sent through the online protocol. Each chooser has a 12-second timer. Shooter timeout can be set to a straight shot or a deliberate forfeit. Portrait HUD controls are arranged for thumb reach; interactive targets are at least 44px high, and the viewport blocks page scroll and zoom during play.
+
 ### Friction
 
 Friction is applied **once**. Matter's own `frictionAir` and `friction` are 0, and `physics/world.ts` applies a single Coulomb-style sliding friction each fixed step (constant deceleration = `grip × surface.frictionScale`). Bodies slow down and stop crisply, with no long exponential creep. The same per-step hook adds the slope acceleration on The Hill. Nothing moves a fixed distance during play; positions are only written between plays (kickoffs and set pieces).
@@ -46,9 +52,9 @@ src/
   config/      tuning.ts, rulesets.ts   ← the only places with magic numbers / rules
   physics/     world.ts (Matter world, bodies, flick impulse, friction, contacts), settle.ts (pure)
   game/        match.ts (orchestrator), turns.ts (state machine), rules.ts (goal latch, scoring),
-               play.ts (per-play tracker: fouls, offside, corners, board bonus, pass chains),
+               play.ts (per-play tracker: fouls, advantage, throw-ins, offside, corners, board bonus, pass chains),
                setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, emitter.ts
-  input/       flick.ts (pointer events, drag-back aim + off-centre spin, single attach/detach)
+  input/       flick.ts (pointer events, drag-back aim + off-centre spin), penalty.ts (private keeper drag + local multi-touch guard)
   debug/       tunables.ts (live parameter catalog + export/reset, pure), overlay.ts (tuning panel + debug drawing)
   render/      renderer.ts, surfaces.ts (procedural pitches), capArt.ts (caps + sprite cache), view.ts
   fx/          effects.ts (pooled particles, screen shake)
