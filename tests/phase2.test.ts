@@ -20,7 +20,7 @@ const BALL: BodyTag = { kind: 'ball' }
 const SIDE: BodyTag = { kind: 'static', board: 'side', end: -1 }
 const BYLINE = (end: 0 | 1): BodyTag => ({ kind: 'static', board: 'byline', end })
 const hit = (a: BodyTag, b: BodyTag, x = 500, y = 300, impact = 5): Contact => ({ a, b, x, y, impact })
-const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, sidelineThrowIns: false, ...over })
+const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, ...over })
 const tracker = (flicker: CapInfo, r = rules(), pos = newPossession(), offside = new Set<number>()) =>
   new PlayTracker(flicker, r, pos, { touchingBallAtFlick: false, offsideAtFlick: offside })
 
@@ -216,7 +216,7 @@ describe('cap types & surfaces (real physics)', () => {
 
 describe('match integration (real physics)', () => {
   it('ball bounced off the board back onto your own cap gives a bonus flick', () => {
-    const m = new Match({ ruleset: { ...RULESETS.street, sidelineThrowIns: false }, surface: 'park' })
+    const m = new Match({ ruleset: RULESETS.street, surface: 'park' })
     m.world.caps.forEach((b, i) => m.world.place(b, { x: 150 + i * 75, y: 560 }))
     m.world.place(m.world.ball, { x: 500, y: 90 })
     m.world.place(m.world.caps[4], { x: 500, y: 150 })

@@ -13,7 +13,7 @@ const run = (m: Match, ms: number, until?: () => boolean) => {
   for (let t = 0; t < ms; t += FRAME) { m.update(FRAME); if (until?.()) return t }
   return ms
 }
-const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, sidelineThrowIns: false, ...over })
+const rules = (over: Partial<Ruleset> = {}): Ruleset => ({ ...RULESETS.street, ...over })
 
 /** Lone striker (slot 4, team 0) flicked right from (80, 310); everything else parked out of the way. */
 function soloFlick(spin: number, power = 0.7, ruleset = rules()) {

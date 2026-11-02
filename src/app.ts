@@ -491,8 +491,7 @@ export class App {
   private onTurn(team: TeamIndex, reason: TurnReason): void {
     const m = this.match
     if (reason === 'normal' || reason === 'bonus' || reason === 'kickoff' || reason === 'halftime') this.restartZone = null
-    const isThrowIn = this.restartZone?.kind === 'throwin' && this.restartZone.team === team
-    this.ui.setTurn(team, this.teams, isThrowIn ? 'take the throw-in' : TURN_LABEL[reason])
+    this.ui.setTurn(team, this.teams, TURN_LABEL[reason])
     const color = this.teams[team].primary
     if (reason === 'bonus') { this.ui.banner('BONUS FLICK!', color, 1100); this.crowd.chant() }
     if (reason === 'corner' || reason === 'goalkick' || reason === 'freekick' || reason === 'penalty' || reason === 'offside' || reason === 'dropball') {
@@ -509,10 +508,6 @@ export class App {
         this.ui.caption(why, 3200) // the caption always states the actual rule call
       }
       if (reason === 'penalty' || reason === 'dropball') this.say(reason, { team: this.teams[team].name }, 2)
-    }
-    if (isThrowIn && this.restartZone) {
-      const other = this.teams[team === 0 ? 1 : 0].name
-      this.ui.caption(`${other} touched it last over the sideline · throw-in to ${this.teams[team].name}.`, 2600)
     }
     if (reason === 'keeper' && m?.shootout) {
       const so = m.shootout
@@ -700,7 +695,6 @@ export class App {
   private onWhistle(w: Whistle | { kind: 'dropball' }): void {
     this.audio.whistle()
     if (w.kind === 'dropball') { this.ui.banner('DEAD BALL', '#f5d000', 1200); return }
-    if (w.kind === 'throwin') return
     this.crowd.ooh()
     this.ui.banner(w.kind === 'foul' ? 'FOUL!' : 'OFFSIDE!', '#f5d000', 1200)
     this.say(w.kind === 'foul' ? 'foul' : 'offside', {}, 3)
@@ -710,7 +704,7 @@ export class App {
     this.restartZone = r
     const labels: Record<Outcome['kind'], string> = {
       normal: 'Play on', bonus: 'Bonus flick', freekick: 'Free kick', penalty: 'Penalty', corner: 'Corner',
-      goalkick: r.retake ? 'Goal-kick retake' : 'Goal kick', throwin: 'Throw-in', dropball: 'Dropped ball',
+      goalkick: r.retake ? 'Goal-kick retake' : 'Goal kick', dropball: 'Dropped ball',
     }
     this.ui.restartBanner(`${labels[r.kind]} · ${this.teams[r.team].name}`, this.teams[r.team].primary)
   }
@@ -725,7 +719,6 @@ export class App {
     }
     if (e.type === 'boardBonus') { this.ui.banner('OFF THE BOARDS!', this.teams[e.team].primary, 1000); this.say('bonus', { team: this.teams[e.team].name, cap: this.capName(e.capId) }, 2) }
     if (e.type === 'byline') { this.lastOut = { x: e.info.at.x, y: e.info.at.y }; this.outMark = { ...this.lastOut, t0: performance.now() }; this.audio.whistle(false) }
-    if (e.type === 'throwin') { this.lastOut = { ...e.at }; this.outMark = { ...this.lastOut, t0: performance.now() }; this.audio.whistle(false) }
     if (e.type === 'boardHit') this.particles.dust(e.at.x, e.at.y, 6, SURFACES[this.surfaceOfMatch()].dustColor, 0.8, 4)
   }
 
@@ -1322,7 +1315,6 @@ export function rulesHtml(r: Ruleset, surface: SurfaceId, shootout = false): str
     ? '<p><b>Corners &amp; goal kicks.</b> The ball smashing into the board beside a goal is out (soft rolls play on); the ref marks the spot. Real-football rule: the team that touched it <b>last</b> gives it up. Last touch by the defending team: corner to the attackers. Last touch by the attackers: goal kick.</p>'
     : '<p><b>Corners &amp; goal kicks.</b> The ball smashing into the board beside a goal is out (soft rolls play on); the ref marks the spot. Whoever\'s <b>flick</b> sent it out gives it up — deflections don\'t count. Your flick sends it into <b>their</b> end: goal kick to them, everyone back in formation. Your flick sends it into <b>your own</b> end: corner to them, both teams line up in the box.</p>')
   if (r.offside) on.push('<p><b>Offside.</b> A team-mate past the ball and the second-last defender (in the other half) when you flick is offside if the ball reaches them.</p>')
-  if (r.sidelineThrowIns) on.push('<p><b>Throw-ins.</b> A firm ball hit into a long-side board is out. Last touch decides it: the other team takes a throw-in, with opponents moved back the restart distance.</p>')
   if (r.goalKickRestriction) on.push('<p><b>Goal kicks.</b> Opponents start outside the penalty area. The kick must leave the box; if it settles without clearing, the goal kick is retaken.</p>')
   if (r.keeperBox) on.push('<p><b>Keeper box.</b> A goalkeeper pushed outside its own penalty area is returned inside after the play settles.</p>')
   if (r.hiddenPenalties) on.push('<p><b>Hidden penalties.</b> On local two-player penalties, the keeper and shooter choose in separate covered turns. Neither sees the other choice until both lock in. Each choice has a countdown; shooter timeout follows your selected Straight Shot or Forfeit rule.</p>')

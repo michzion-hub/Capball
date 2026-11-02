@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FOOTBALL } from '../src/config/football'
 import { RULESETS } from '../src/config/rulesets'
-import { BALL, CAP_TYPES, PITCH } from '../src/config/tuning'
+import { CAP_TYPES, PITCH } from '../src/config/tuning'
 import { HiddenPenalty, legalKeeperPosition } from '../src/game/penalty'
 import { PlayTracker, newPossession } from '../src/game/play'
 import { setPieceTargets } from '../src/game/setpieces'
@@ -19,43 +19,20 @@ function tracker(flicker = cap(4, 0), rules = RULESETS.street) {
 }
 
 describe('phone-first football rules', () => {
-  it('awards a throw-in to the team that did not touch last and stops play immediately', () => {
+  it('keeps a long-side board hit in play and still awards a board-pass bonus', () => {
     const t = tracker()
     t.onContact(contact(capTag(cap(4, 0)), ball))
     t.onContact(contact(ball, side, 500, 2))
-    expect(t.take().some(e => e.type === 'whistle' && e.whistle.kind === 'throwin')).toBe(true)
-    expect(t.resolve()).toMatchObject({ kind: 'throwin', next: 1, lastTeam: 0, at: { x: 500, y: 2 } })
+    expect(t.take().some(e => e.type === 'boardHit')).toBe(true)
+    t.onContact(contact(ball, capTag(cap(5, 0)), 520, 300))
+    expect(t.resolve()).toMatchObject({ kind: 'bonus', next: 0 })
   })
 
-  it('awards the throw to team 0 when team 1 had the last cap touch', () => {
+  it('does not whistle or award a restart when the ball hits a long-side board', () => {
     const t = tracker()
-    t.onContact(contact(capTag(cap(4, 0)), ball))
-    t.onContact(contact(ball, capTag(cap(6, 1)), 520, 300))
-    t.onContact(contact(ball, side, 520, PITCH.height - 1))
-    expect(t.resolve()).toMatchObject({ kind: 'throwin', next: 0, lastTeam: 1 })
-  })
-
-  it('positions a throw-in without overlaps and retreats the defending team', () => {
-    const caps = Array.from({ length: 10 }, (_, id) => ({
-      id, team: (id < 5 ? 0 : 1) as TeamIndex, slot: id % 5,
-      type: 'standard' as const, x: 500 + (id % 3) * 8, y: id < 5 ? 22 + id : 590 - id, active: true,
-    }))
-    const targets = setPieceTargets(
-      { kind: 'throwin', next: 0, lastTeam: 1, at: { x: 500, y: 0 } },
-      caps, { x: 0, y: 0 }, RULESETS.street,
-    )!
-    expect(targets.ball.y).toBeGreaterThan(BALL.radius)
-    const taker = caps.find(c => c.team === 0 && c.slot === 3)!
-    expect(Math.hypot(targets.caps[taker.id].x - targets.ball.x, targets.caps[taker.id].y - targets.ball.y)).toBeGreaterThanOrEqual(BALL.radius + CAP_TYPES.standard.radius)
-    for (const c of caps.filter(c => c.team === 1)) {
-      expect(Math.hypot(targets.caps[c.id].x - targets.ball.x, targets.caps[c.id].y - targets.ball.y)).toBeGreaterThanOrEqual(RULESETS.street.wallDistance + CAP_TYPES.standard.radius - 0.01)
-    }
-    for (let i = 0; i < caps.length; i++) {
-      expect(Math.hypot(targets.caps[i].x - targets.ball.x, targets.caps[i].y - targets.ball.y)).toBeGreaterThanOrEqual(CAP_TYPES.standard.radius + BALL.radius - 0.01)
-      for (let j = i + 1; j < caps.length; j++) {
-        expect(Math.hypot(targets.caps[i].x - targets.caps[j].x, targets.caps[i].y - targets.caps[j].y)).toBeGreaterThanOrEqual(2 * CAP_TYPES.standard.radius - 0.01)
-      }
-    }
+    t.onContact(contact(ball, side, 500, 2))
+    expect(t.take().some(e => e.type === 'whistle')).toBe(false)
+    expect(t.resolve()).toMatchObject({ kind: 'normal', next: 1 })
   })
 
   it('plays advantage when the victim touches the ball and makes clear forward progress', () => {

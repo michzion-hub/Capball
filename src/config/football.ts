@@ -6,8 +6,6 @@ export const FOOTBALL = {
   advantageGain: 60,
   /** Keep placement away from a drawn boundary line, in world units. */
   restartInset: 16,
-  /** Throw-in taker stands this far behind the ball, perpendicular to the sideline. */
-  throwInTakerGap: 28,
   /** Distance from the penalty area edge for players who must retreat. */
   penaltyRetreatInset: 10,
   /** Penalty taker stands this far behind the ball, toward midfield. */

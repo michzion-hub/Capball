@@ -41,8 +41,6 @@ export interface Ruleset {
   spin: boolean
   /** A ball pinned against the boards that stays put for this many plays is dropped back in. 0 = never. */
   deadBallTurns: number
-  /** Side-line contact above outMinImpact is a throw-in to the team that did not touch last. */
-  sidelineThrowIns: boolean
   /** Opponents stay outside the penalty area until a goal kick leaves it; otherwise retake. */
   goalKickRestriction: boolean
   /** Delay a foul whistle when the fouled team can retain a clearly better attacking position. */
@@ -72,7 +70,6 @@ const base: Omit<Ruleset, 'id' | 'name' | 'blurb'> = {
   deadBallTurns: 2,
   outMinImpact: 2,
   outBy: 'flick',
-  sidelineThrowIns: true,
   goalKickRestriction: true,
   advantage: true,
   keeperBox: true,

@@ -76,43 +76,6 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
 
   if (o.kind === 'corner') return cornerSetup(o.end, o.at.y < H / 2 ? -1 : 1, kicker, caps, rules)
 
-  if (o.kind === 'throwin') {
-    ballAt = clampToPitch(o.at, BALL.radius + FOOTBALL.restartInset / 2)
-    const placed: Circle[] = [{ ...ballAt, r: BALL.radius }]
-    const taker = caps.find(c => c.team === kicker && c.slot === 3 && c.active)
-      ?? caps.find(c => c.team === kicker && c.slot === 4 && c.active)
-      ?? caps.find(c => c.team === kicker && c.active)
-    const side = ballAt.y < H / 2 ? 1 : -1
-    if (taker) {
-      const p = clampToPitch({ x: ballAt.x, y: ballAt.y + side * (BALL.radius + r(taker) + FOOTBALL.throwInTakerGap) }, r(taker) + 4)
-      targets[taker.id] = findFreeSpot(p, r(taker), placed, 3)
-      placed.push({ ...targets[taker.id], r: r(taker) })
-    }
-    // Nearby teammates keep their shape, but cannot start on the ball or the thrower's cap.
-    for (const c of caps) {
-      if (!c.active || c.team !== kicker || c === taker) continue
-      const p = findFreeSpot({ x: c.x, y: c.y }, r(c), placed, 3)
-      targets[c.id] = p
-      placed.push({ ...p, r: r(c) })
-    }
-    // The opposing team must retreat the same set-piece distance.
-    const wall: Circle = { ...ballAt, r: rules.wallDistance }
-    for (const c of caps) {
-      if (!c.active || c.team === kicker) continue
-      const d = Math.hypot(c.x - ballAt.x, c.y - ballAt.y)
-      let p = { x: c.x, y: c.y }
-      if (d < rules.wallDistance + r(c)) {
-        const ux = d > 1e-3 ? (c.x - ballAt.x) / d : -side
-        const uy = d > 1e-3 ? (c.y - ballAt.y) / d : 0
-        p = { x: ballAt.x + ux * (rules.wallDistance + r(c) + 2), y: ballAt.y + uy * (rules.wallDistance + r(c) + 2) }
-      }
-      p = findFreeSpot(p, r(c), [...placed, wall], 4)
-      targets[c.id] = p
-      placed.push({ ...p, r: r(c) })
-    }
-    return { caps: targets, ball: ballAt }
-  }
-
   if (o.kind === 'freekick') ballAt = clampToPitch(o.at, BALL.radius + FOOTBALL.restartInset / 2)
   else {
     // Goal kick: restart inside the six-yard goal area and reset the shape.

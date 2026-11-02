@@ -13,7 +13,6 @@ export const FLAG_DEFS = [
   { key: 'corners', label: 'Corners' },
   { key: 'freeKicks', label: 'Free kicks' },
   { key: 'penalties', label: 'Penalties' },
-  { key: 'sidelineThrowIns', label: 'Throw-ins' },
   { key: 'goalKickRestriction', label: 'Goal-kick clearance' },
   { key: 'advantage', label: 'Advantage' },
   { key: 'keeperBox', label: 'Keeper stays in box' },

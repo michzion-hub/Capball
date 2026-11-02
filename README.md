@@ -37,7 +37,7 @@ With corners on, the ball is out only when it hits the end board at least as har
 
 ### Phone-first rules and hidden penalties
 
-The default ruleset also enables throw-ins, goal-kick clearance, advantage and keeper-box limits. A firm ball hit into a long-side board is a throw-in for the team that did not touch it last; its taker is placed beside the ball and opponents are moved back. A goal kick resets the kicking side to formation while the other side waits outside the penalty area. The ball must clear that area before an opponent can enter; if it settles inside without clearing, the kick is retaken. A goalkeeper pushed out of its own penalty area is returned inside only after the play settles. Advantage is kept only when the fouled team touches the ball, retains the last touch and makes meaningful forward progress; otherwise the free kick or penalty is brought back.
+The default ruleset enables goal-kick clearance, advantage and keeper-box limits. Long-side boards stay in play: ball contact rebounds naturally, can set up the board-bonus mechanic and never starts a dead-ball restart. A goal kick resets the kicking side to formation while the other side waits outside the penalty area. The ball must clear that area before an opponent can enter; if it settles inside without clearing, the kick is retaken. A goalkeeper pushed out of its own penalty area is returned inside only after the play settles. Advantage is kept only when the fouled team touches the ball, retains the last touch and makes meaningful forward progress; otherwise the free kick or penalty is brought back.
 
 Turn on **Hidden penalties** in Quick Match or Tournament setup for a local pass-the-device commit–reveal. The keeper chooses along the goal line (or inside the goal area if enabled), locks the position, and the next player receives an opaque handoff cover. The shooter stages one normal drag-back flick and locks it; only then are both choices revealed and the flick enters the existing physics simulation. The staged direction and power remain local and are not sent through the online protocol. Each chooser has a 12-second timer. Shooter timeout can be set to a straight shot or a deliberate forfeit. Portrait HUD controls are arranged for thumb reach; interactive targets are at least 44px high, and the viewport blocks page scroll and zoom during play.
 
@@ -52,7 +52,7 @@ src/
   config/      tuning.ts, rulesets.ts   ← the only places with magic numbers / rules
   physics/     world.ts (Matter world, bodies, flick impulse, friction, contacts), settle.ts (pure)
   game/        match.ts (orchestrator), turns.ts (state machine), rules.ts (goal latch, scoring),
-               play.ts (per-play tracker: fouls, advantage, throw-ins, offside, corners, board bonus, pass chains),
+               play.ts (per-play tracker: fouls, advantage, offside, corners, board bonus, pass chains),
                setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, emitter.ts
   input/       flick.ts (pointer events, drag-back aim + off-centre spin), penalty.ts (private keeper drag + local multi-touch guard)
   debug/       tunables.ts (live parameter catalog + export/reset, pure), overlay.ts (tuning panel + debug drawing)
