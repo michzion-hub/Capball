@@ -78,24 +78,30 @@ export function setPieceTargets(o: Outcome, caps: PieceCap[], _ball: Vec, rules:
 
   if (o.kind === 'freekick') ballAt = clampToPitch(o.at, BALL.radius + FOOTBALL.restartInset / 2)
   else {
-    // Goal kick: restart inside the six-yard goal area and reset the shape.
-    const x = o.end === 0 ? PITCH.goalBox.depth : W - PITCH.goalBox.depth
-    const y = o.at.y < H / 2 ? H / 2 - PITCH.goalBox.width / 4 : H / 2 + PITCH.goalBox.width / 4
-    ballAt = { x, y }
+    // Reset both sides to their base shape; put the defending keeper behind the ball.
+    const lineX = o.end === 0 ? 0 : W
+    const inward = o.end === 0 ? 1 : -1
+    const keeper = caps.find(c => c.active && c.team === kicker && c.slot === 0)
+    const keeperRadius = keeper ? r(keeper) : CAP_TYPES.keeper.radius
+    const keeperAt = {
+      x: lineX + inward * (keeperRadius + FOOTBALL.goalKickKeeperInset),
+      y: H / 2,
+    }
     const placed: Circle[] = []
     for (const c of caps) {
       if (!c.active) continue
       let p = basePosition(c.team, c.slot)
-      if (rules.goalKickRestriction && c.team !== kicker) {
-        // Opponents line up just outside the penalty-area boundary, not inside the box.
-        const edge = o.end === 0 ? PITCH.penaltyBox.depth : W - PITCH.penaltyBox.depth
-        p = { x: edge + (o.end === 0 ? 1 : -1) * (r(c) + FOOTBALL.penaltyRetreatInset), y: H * (placed.length + 1) / (caps.length + 1) }
-      }
+      if (c === keeper) p = keeperAt
       p = findFreeSpot(p, r(c), placed, 4)
       targets[c.id] = p
       placed.push({ ...p, r: r(c) })
     }
-    ballAt = findFreeSpot(ballAt, BALL.radius, placed, 3)
+    const actualKeeper = keeper ? targets[keeper.id] : keeperAt
+    ballAt = {
+      x: actualKeeper.x + inward * (keeperRadius + BALL.radius + FOOTBALL.goalKickBallGap),
+      y: actualKeeper.y,
+    }
+    ballAt = findFreeSpot(ballAt, BALL.radius, placed, 0)
     return { caps: targets, ball: ballAt }
   }
 

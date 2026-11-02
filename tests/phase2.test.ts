@@ -174,9 +174,16 @@ describe('set pieces', () => {
     expect(t.caps[4].x).toBeLessThan(t.ball.x)
     for (const c of caps) if (c.id !== 5 && c.id !== 4) expect(inPenaltyBox(t.caps[c.id], 1)).toBe(false)
   })
-  it('goal kick: kicking side resets to formation, opponents stay outside the box', () => {
+  it('goal kick: both sides reset, keeper stands behind the ball and opponents stay outside the box', () => {
     const t = setPieceTargets({ kind: 'goalkick', next: 0, end: 0, at: { x: -5, y: 100 } }, caps, { x: 0, y: 0 }, rules())!
-    for (const c of caps.filter(c => c.team === 0)) expect(t.caps[c.id]).toEqual(basePosition(c.team, c.slot))
+    for (const c of caps) {
+      if (c.id === 0) continue // The keeper moves to the goal line for the kick.
+      expect(t.caps[c.id]).toEqual(basePosition(c.team, c.slot))
+    }
+    expect(t.caps[0].x).toBeLessThan(basePosition(0, 0).x)
+    expect(t.caps[0].y).toBe(PITCH.height / 2)
+    expect(t.ball.x).toBeGreaterThan(t.caps[0].x)
+    expect(t.ball.y).toBe(t.caps[0].y)
     for (const c of caps.filter(c => c.team === 1)) expect(t.caps[c.id].x).toBeGreaterThan(PITCH.penaltyBox.depth)
     expect(t.ball.x).toBeLessThanOrEqual(PITCH.goalBox.depth)
     for (const c of caps) expect(Math.hypot(t.caps[c.id].x - t.ball.x, t.caps[c.id].y - t.ball.y)).toBeGreaterThan(22 + 12)

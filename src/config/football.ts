@@ -16,6 +16,10 @@ export const FOOTBALL = {
   keeperBoxInset: 4,
   /** Ball centre must be beyond the penalty-area edge by this many units to clear a goal kick. */
   goalKickClearance: 2,
+  /** Keeper starts this far inside the goal line for a goal kick. */
+  goalKickKeeperInset: 1,
+  /** Clear space between the keeper cap and ball at a goal kick. */
+  goalKickBallGap: 1,
   /** Each hidden keeper/shooter selection phase gets this much time. */
   hiddenPenaltyPhaseMs: 12_000,
   /** If the shooter times out with the straight-shot default, use this power. */

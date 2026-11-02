@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { FOOTBALL } from '../src/config/football'
 import { RULESETS } from '../src/config/rulesets'
-import { CAP_TYPES, PITCH } from '../src/config/tuning'
+import { BALL, CAP_TYPES, PITCH } from '../src/config/tuning'
 import { HiddenPenalty, legalKeeperPosition } from '../src/game/penalty'
 import { PlayTracker, newPossession } from '../src/game/play'
 import { setPieceTargets } from '../src/game/setpieces'
@@ -59,22 +59,34 @@ describe('phone-first football rules', () => {
     expect(t.resolve({ x: 520, y: 300 })).toMatchObject({ kind: 'freekick', next: 1 })
   })
 
-  it('resets goal-kick shape while keeping opponents outside the penalty area', () => {
+  it.each([0, 1] as const)('resets both formations and puts the ball ahead of the keeper at end %i', end => {
     const caps = Array.from({ length: 10 }, (_, id) => ({
       id, team: (id < 5 ? 0 : 1) as TeamIndex, slot: id % 5,
       type: 'standard' as const, x: 430 + id * 5, y: 280 + id * 3, active: true,
     }))
+    const kicker = (end === 0 ? 0 : 1) as TeamIndex
     const targets = setPieceTargets(
-      { kind: 'goalkick', next: 0, end: 0, at: { x: -10, y: 80 } },
+      { kind: 'goalkick', next: kicker, end, at: { x: end === 0 ? -10 : PITCH.width + 10, y: 80 } },
       caps, { x: 0, y: 0 }, RULESETS.street,
     )!
-    for (const c of caps.filter(c => c.team === 0)) expect(targets.caps[c.id]).toEqual(basePosition(c.team, c.slot))
-    for (const c of caps.filter(c => c.team === 1)) {
-      const p = targets.caps[c.id]
-      expect(p.x).toBeGreaterThan(PITCH.penaltyBox.depth)
+    const keeper = caps.find(c => c.team === kicker && c.slot === 0)!
+    const keeperAt = targets.caps[keeper.id]
+    for (const c of caps) {
+      if (c === keeper) continue
+      expect(targets.caps[c.id]).toEqual(basePosition(c.team, c.slot))
     }
-    expect(targets.ball.x).toBeGreaterThan(0)
-    expect(targets.ball.x).toBeLessThan(PITCH.penaltyBox.depth)
+    const depthFromGoal = (x: number) => end === 0 ? x : PITCH.width - x
+    const keeperDepth = depthFromGoal(keeperAt.x)
+    const ballDepth = depthFromGoal(targets.ball.x)
+    expect(targets.ball.y).toBeCloseTo(PITCH.height / 2)
+    expect(ballDepth).toBeGreaterThan(keeperDepth)
+    expect(ballDepth - keeperDepth).toBeCloseTo(CAP_TYPES[keeper.type].radius + BALL.radius + FOOTBALL.goalKickBallGap)
+    expect(ballDepth).toBeLessThan(PITCH.goalBox.depth)
+    expect(ballDepth).toBeLessThan(PITCH.penaltyBox.depth)
+    for (const c of caps.filter(c => c.team !== kicker)) {
+      const p = targets.caps[c.id]
+      expect(end === 0 ? p.x : PITCH.width - p.x).toBeGreaterThan(PITCH.penaltyBox.depth)
+    }
   })
 
   it('clamps keeper movement to the goal line by default and to the goal box when enabled', () => {
