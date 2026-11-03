@@ -20,6 +20,7 @@
 - [x] Design-your-own cap: colour, pattern, number and name.
 - [x] Match modes: quick match, penalty shootout, short tournament.
 - [x] Playable offline as an installable mobile web app.
+- [x] Main menu layout and accessibility: preserve the comic-poster CAPBALL logo with bottle-cap dot, red/black/paper-texture palette, sticker-style buttons and tagline. Make Quick Match the largest primary button; show Design Your Caps as a large secondary button with a small cap icon, the same size as Penalty Shootout and Street Tournament, in this order: Quick Match, Design Your Caps, Penalty Shootout, Street Tournament. Move Commentary, Voice, Sound and Tuning Tools out of the main buttons into a corner gear/settings panel with plain-text labels and clear On/Off switches; Tuning Tools must only appear behind a debug flag or hidden key. Keep main buttons equal width and consistently spaced. Centre the menu on wide screens; use one column on phones; ensure portrait, landscape and desktop fit without clipped content or awkward scrolling. Make small handwritten menu text higher-contrast and at least 16px; keep controls at least 44px tall. Add visible keyboard focus outlines, screen-reader labels and reduced-motion support. Do not change gameplay or physics.
 
 ## Phase 4 — AI, online and leaderboards
 - [x] AI opponent: local single-player mode with selectable difficulty; the opponent chooses and executes real physics flicks.
@@ -38,6 +39,7 @@ AI design expansion, online spectators, durable accounts, cash-prize/ranked comp
 - [x] Push the self-contained source to the linked `michzion-hub/Capball` GitHub repository after verification; the connected Vercel Git integration can then build its branch deployment.
 
 Verification: fresh npm install/build passed; 96 unit tests passed (one optional physics probe is skipped); production build passed; expanded browser smoke passed, including touch input, local hidden-penalty commit–reveal, AI and two-browser online prototype; `npm audit` previously reported 0 vulnerabilities after updating `ws` to 8.22.0.
+Menu verification: browser smoke passed on desktop (1280×760), phone portrait (390×844) and phone landscape (844×390), including no-overflow/no-scroll checks, button order/width, visible keyboard focus, keyboard-operated On/Off switch behavior, settings focus restoration, and Tuning Tools hidden by default and shown only with `?debug=1`.
 
 
 ## Current request — phone-first rules and hidden-choice penalties

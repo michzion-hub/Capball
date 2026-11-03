@@ -60,6 +60,7 @@ export class App {
   readonly ruleGestureGuard: RuleGestureGuard
   readonly tune: TuneOverlay
   settings: Settings
+  private readonly debugToolsEnabled: boolean
   match: Match | null = null
   ruleset: Ruleset
   mode: Mode = 'quick'
@@ -102,6 +103,7 @@ export class App {
 
   constructor(canvas: HTMLCanvasElement, uiRoot: HTMLElement) {
     this.canvas = canvas
+    this.debugToolsEnabled = import.meta.env.DEV || new URLSearchParams(window.location.search).get('debug') === '1'
     this.settings = loadSettings()
     this.teams = resolveKits(this.settings.teams[0], this.settings.teams[1])
     this.ruleset = buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout)
@@ -139,8 +141,10 @@ export class App {
     this.ruleGestureGuard.attach()
     this.audio.setEnabled(this.settings.sound)
     this.audio.onReady = () => { if (this.settings.sound) this.crowd.start() }
+    if (!this.voice.available) this.settings.speech = false
     this.voice.enabled = this.settings.speech
     this.ui.setSound(this.settings.sound)
+    this.syncSettingsPanel()
     this.renderStartMenu()
     this.ui.show('start')
 
@@ -163,19 +167,24 @@ export class App {
   }
 
   private renderStartMenu(): void {
-    const s = this.settings
     this.ui.html('[data-start-menu]', `
-      <button class="btn" data-action="mode:quick">Quick match</button>
-      <button class="btn ghost" data-action="mode:ai">Play the AI</button>
-      <button class="btn ghost" data-action="mode:online">Online · invite a mate</button>
-      <button class="btn ghost" data-action="mode:shootout">Penalty shootout</button>
-      <button class="btn ghost" data-action="mode:tournament">Street tournament</button>
-      <button class="chip" data-action="editor">Design your caps</button>
-      <div class="start-toggles">
-        <button class="chip ${s.commentary ? '' : 'is-off'}" data-action="toggle:commentary">Commentary ${s.commentary ? 'on' : 'off'}</button>
-        ${this.voice.available ? `<button class="chip ${s.speech ? '' : 'is-off'}" data-action="toggle:speech">Voice ${s.speech ? 'on' : 'off'}</button>` : ''}
-        <button class="chip ${s.tuning ? '' : 'is-off'}" data-action="toggle:tuning">Tuning tools ${s.tuning ? 'on' : 'off'}</button>
-      </div>`)
+      <div class="start-main-actions" role="group" aria-label="Main game modes">
+        <button class="btn menu-main menu-primary" data-main-mode="quick" data-action="mode:quick">Quick Match</button>
+        <button class="btn ghost menu-main" data-main-mode="design" data-action="editor">
+          <svg class="menu-cap-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle cx="16" cy="16" r="13"/><circle class="cap-inner" cx="16" cy="16" r="8"/><path d="M16 3v5M16 24v5M3 16h5M24 16h5M6.8 6.8l3.6 3.6M21.6 21.6l3.6 3.6M25.2 6.8l-3.6 3.6M10.4 21.6l-3.6 3.6"/></svg>
+          Design Your Caps
+        </button>
+        <button class="btn ghost menu-main" data-main-mode="shootout" data-action="mode:shootout">Penalty Shootout</button>
+        <button class="btn ghost menu-main" data-main-mode="tournament" data-action="mode:tournament">Street Tournament</button>
+      </div>
+      <details class="start-more">
+        <summary>Other modes &amp; help</summary>
+        <div class="start-more-actions">
+          <button class="chip" data-action="rules">How to play</button>
+          <button class="chip" data-action="mode:ai">Play the AI</button>
+          <button class="chip" data-action="mode:online">Online · invite a mate</button>
+        </div>
+      </details>`)
   }
 
   private openOnline(): void {
@@ -1054,6 +1063,7 @@ export class App {
       case 'go': this.go(); break
       case 'back': this.toMenu(); break
       case 'editor': this.openEditor(this.ui.root.dataset.current === 'setup' ? 'setup' : 'start'); break
+      case 'settings': this.ui.modal('settings'); break
       case 'swatch': {
         const [i, field, color] = arg.split(':')
         this.settings.teams[Number(i)][field as 'primary' | 'secondary'] = color
@@ -1070,10 +1080,14 @@ export class App {
       case 'editor-done': this.closeEditor(); break
       case 'toggle':
         if (arg === 'commentary') this.settings.commentary = !this.settings.commentary
-        if (arg === 'speech') { this.settings.speech = !this.settings.speech; this.voice.enabled = this.settings.speech; if (!this.settings.speech) this.voice.stop() }
-        if (arg === 'tuning') this.setTuning(!this.settings.tuning)
+        else if (arg === 'speech' && this.voice.available) {
+          this.settings.speech = !this.settings.speech
+          this.voice.enabled = this.settings.speech
+          if (!this.settings.speech) this.voice.stop()
+        } else if (arg === 'sound') this.setSound(!this.settings.sound)
+        else if (arg === 'tuning' && this.debugToolsEnabled) this.setTuning(!this.settings.tuning)
+        this.syncSettingsPanel()
         saveSettings(this.settings)
-        this.renderStartMenu()
         break
       case 'tune': this.tune.toggle(); break
       case 'arm': this.match?.toggleArm(); this.refreshActionButton(); break
@@ -1131,20 +1145,35 @@ export class App {
         break
       }
       case 'sound':
-        this.settings.sound = !this.settings.sound
-        this.audio.setEnabled(this.settings.sound)
-        if (this.settings.sound) this.crowd.start()
-        else this.crowd.stop()
-        this.ui.setSound(this.settings.sound)
+        this.setSound(!this.settings.sound)
         saveSettings(this.settings)
         break
     }
   }
 
+  private setSound(on: boolean): void {
+    this.settings.sound = on
+    this.audio.setEnabled(on)
+    if (on) this.crowd.start()
+    else this.crowd.stop()
+    this.ui.setSound(on)
+  }
+
   private setTuning(on: boolean): void {
-    this.settings.tuning = on
-    this.tune.setEnabled(on)
-    this.ui.$('[data-tune-btn]').hidden = !on
+    const enabled = on && this.debugToolsEnabled
+    this.settings.tuning = enabled
+    this.tune.setEnabled(enabled)
+    this.ui.$('[data-tune-btn]').hidden = !enabled
+    this.ui.setSettingSwitch('tuning', enabled)
+  }
+
+  private syncSettingsPanel(): void {
+    this.ui.setSettingSwitch('commentary', this.settings.commentary)
+    this.ui.setSettingSwitch('speech', this.settings.speech)
+    this.ui.setSettingSwitch('sound', this.settings.sound)
+    this.ui.setSettingSwitch('tuning', this.settings.tuning && this.debugToolsEnabled)
+    this.ui.setSettingAvailable('speech', this.voice.available, 'Voice is unavailable in this browser.')
+    this.ui.$('[data-setting-row="tuning"]').hidden = !this.debugToolsEnabled
   }
 
   private go(): void {

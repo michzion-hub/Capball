@@ -89,6 +89,34 @@ async function finishPlay(page) {
   await waitPhase(page, () => ['aim', 'over'].includes(window.__capball.match.phase), 20000)
 }
 
+async function assertStartMenu(page, label) {
+  await page.evaluate(() => document.fonts.ready)
+  const m = await page.evaluate(() => {
+    const screen = document.querySelector('[data-screen="start"]')
+    const card = document.querySelector('.start-wrap')
+    const buttons = [...document.querySelectorAll('[data-main-mode]')]
+    const rect = card.getBoundingClientRect()
+    return {
+      labels: buttons.map(b => b.innerText.replace(/\s+/g, ' ').trim()),
+      widths: buttons.map(b => b.offsetWidth),
+      heights: buttons.map(b => b.offsetHeight),
+      cardTop: rect.top,
+      cardBottom: rect.bottom,
+      viewportHeight: window.innerHeight,
+      scrollOverflow: screen.scrollHeight - screen.clientHeight,
+      capIcon: !!document.querySelector('[data-main-mode="design"] .menu-cap-icon'),
+      menuHasSoundChip: !!document.querySelector('[data-screen="start"] .start-menu [data-action="sound"]'),
+    }
+  })
+  const expected = ['Quick Match', 'Design Your Caps', 'Penalty Shootout', 'Street Tournament']
+  if (JSON.stringify(m.labels) !== JSON.stringify(expected)) throw new Error(`${label} main menu order mismatch: ${JSON.stringify(m.labels)}`)
+  if (Math.max(...m.widths) - Math.min(...m.widths) > 1) throw new Error(`${label} main buttons have unequal widths: ${JSON.stringify(m.widths)}`)
+  if (m.heights.some(h => h < 44) || m.heights[0] <= Math.max(...m.heights.slice(1))) throw new Error(`${label} button hierarchy/tap-size mismatch: ${JSON.stringify(m.heights)}`)
+  if (!m.capIcon || m.menuHasSoundChip) throw new Error(`${label} cap icon or settings relocation is missing`)
+  if (m.cardTop < -1 || m.cardBottom > m.viewportHeight + 1 || m.scrollOverflow > 2) throw new Error(`${label} menu clips or scrolls: ${JSON.stringify(m)}`)
+  return m
+}
+
 try {
   await waitForRoomServer()
   await waitForServer()
@@ -99,6 +127,28 @@ try {
   const desk = await browser.newContext({ viewport: { width: 1280, height: 760 } })
   const page = await open(desk)
   await page.screenshot({ path: `${out}/01-start.png` })
+  await assertStartMenu(page, 'desktop')
+  await page.keyboard.press('Tab')
+  const firstFocus = await page.evaluate(() => ({ label: document.activeElement?.getAttribute('aria-label'), outline: getComputedStyle(document.activeElement).outlineStyle, width: getComputedStyle(document.activeElement).outlineWidth }))
+  if (firstFocus.label !== 'Open settings' || firstFocus.outline === 'none' || firstFocus.width === '0px') throw new Error(`menu gear focus styling missing: ${JSON.stringify(firstFocus)}`)
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('[data-modal="settings"].is-active')
+  const normalSettings = await page.evaluate(() => ({
+    tuningHidden: document.querySelector('[data-setting-row="tuning"]').hidden,
+    visible: [...document.querySelectorAll('[data-setting-row]:not([hidden])')].map(row => row.dataset.settingRow),
+  }))
+  if (!normalSettings.tuningHidden || JSON.stringify(normalSettings.visible) !== JSON.stringify(['commentary', 'speech', 'sound'])) throw new Error(`normal settings visibility mismatch: ${JSON.stringify(normalSettings)}`)
+  await page.waitForTimeout(260)
+  const sheetOpacity = await page.locator('[data-modal="settings"] .sheet').evaluate(el => Number(getComputedStyle(el).opacity))
+  if (sheetOpacity < 0.95) throw new Error(`settings sheet did not finish appearing: opacity=${sheetOpacity}`)
+  await page.screenshot({ path: `${out}/01-menu-settings.png` })
+  await page.keyboard.press('Space')
+  const switched = await page.locator('[data-setting-switch="commentary"]').getAttribute('aria-checked')
+  const switchLabel = await page.locator('[data-setting-switch="commentary"] [data-setting-state]').innerText()
+  if (switched !== 'false' || switchLabel !== 'Off') throw new Error('keyboard settings switch did not expose its Off state')
+  await page.keyboard.press('Escape')
+  if (!(await page.locator('[data-modal="settings"]').evaluate(el => !el.classList.contains('is-active')))) throw new Error('Escape did not close the settings dialog')
+  if (await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) !== 'Open settings') throw new Error('closing settings did not restore focus to the gear')
   await startMode(page, 'mode:quick')
   const counts0 = await page.evaluate(() => window.__capball.debugCounts())
   let s = await state(page)
@@ -187,7 +237,15 @@ try {
   // ---------- Round 2: tuning overlay + spin flick with a real off-centre grab ----------
   await page.click('.hud-tools [data-action="newmatch"]')
   await page.waitForSelector('[data-screen="start"].is-active')
-  await page.click('[data-action="toggle:tuning"]')
+  const debugUrl = new URL(url)
+  debugUrl.searchParams.set('debug', '1')
+  await page.goto(debugUrl.toString())
+  await page.waitForSelector('[data-screen="start"].is-active')
+  await page.click('[data-action="settings"]')
+  await page.waitForSelector('[data-modal="settings"].is-active')
+  if (!(await page.locator('[data-setting-row="tuning"]').isVisible())) throw new Error('debug flag did not reveal tuning setting')
+  await page.click('[data-setting-switch="tuning"]')
+  await page.click('[data-modal="settings"] [data-action="closemodal"]')
   await startMode(page, 'mode:quick')
   if (!(await page.isVisible('[data-tune-btn]'))) throw new Error('Tune button not shown with tuning tools on')
   await page.click('[data-tune-btn]')
@@ -233,7 +291,10 @@ try {
     if (JSON.stringify(t0) !== JSON.stringify(t1) || t1.overlays !== 1) throw new Error('overlay listeners changed across restart/new match')
     await page.click('.hud-tools [data-action="newmatch"]')
     await page.waitForSelector('[data-screen="start"].is-active')
-    await page.click('[data-action="toggle:tuning"]')
+    await page.click('[data-action="settings"]')
+    await page.waitForSelector('[data-modal="settings"].is-active')
+    await page.click('[data-setting-switch="tuning"]')
+    await page.click('[data-modal="settings"] [data-action="closemodal"]')
     if (await page.isVisible('.tune')) throw new Error('overlay still open after turning tuning tools off')
     await page.click('[data-action="mode:quick"]')
     await page.click('[data-screen="setup"] [data-action="go"]')
@@ -443,7 +504,18 @@ try {
 
   // ---------- phone portrait / real touch ----------
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
-  const pp = await open(phone)
+  const phoneDebugUrl = new URL(url)
+  phoneDebugUrl.searchParams.set('debug', '1')
+  const pp = await open(phone, phoneDebugUrl.toString())
+  await assertStartMenu(pp, 'phone portrait')
+  await pp.click('[data-action="settings"]')
+  await pp.waitForSelector('[data-modal="settings"].is-active')
+  if (!(await pp.locator('[data-setting-row="tuning"]').isVisible())) throw new Error('debug flag did not expose Tuning Tools')
+  await pp.screenshot({ path: `${out}/07-phone-settings-debug.png` })
+  await pp.click('[data-setting-switch="tuning"]')
+  if (!(await pp.evaluate(() => window.__capball.settings.tuning))) throw new Error('debug Tuning Tools switch did not enable the overlay')
+  await pp.click('[data-setting-switch="tuning"]')
+  await pp.click('[data-modal="settings"] [data-action="closemodal"]')
   await pp.screenshot({ path: `${out}/07-phone-start.png` })
   await startMode(pp, 'mode:quick', true)
   const cdp = await phone.newCDPSession(pp)
@@ -471,6 +543,8 @@ try {
   // ---------- phone landscape ----------
   const land = await browser.newContext({ viewport: { width: 844, height: 390 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true })
   const lp = await open(land)
+  await assertStartMenu(lp, 'phone landscape')
+  await lp.screenshot({ path: `${out}/10-phone-landscape-start.png` })
   await startMode(lp, 'mode:quick', true)
   await lp.screenshot({ path: `${out}/10-phone-landscape.png` })
   await land.close()
@@ -478,6 +552,7 @@ try {
   // ---------- Phase 4: local AI opponent ----------
   const aiCtx = await browser.newContext({ viewport: { width: 1050, height: 760 } })
   const aip = await open(aiCtx)
+  await aip.locator('.start-more summary').click()
   await aip.click('[data-action="mode:ai"]')
   await aip.waitForSelector('[data-screen="setup"].is-active [data-action="ai-level:easy"]')
   await aip.click('[data-screen="setup"] [data-action="ai-level:easy"]')
@@ -501,6 +576,7 @@ try {
   // ---------- Phase 4: two real browser clients over the authoritative room server ----------
   const onlineCtxA = await browser.newContext({ viewport: { width: 1080, height: 760 } })
   const onlineA = await open(onlineCtxA)
+  await onlineA.locator('.start-more summary').click()
   await onlineA.click('[data-action="mode:online"]')
   await onlineA.waitForSelector('[data-screen="online"].is-active')
   await onlineA.click('[data-action="online:create"]')
@@ -516,6 +592,7 @@ try {
   invite.searchParams.set('room', room)
   const onlineCtxB = await browser.newContext({ viewport: { width: 1080, height: 760 } })
   const onlineB = await open(onlineCtxB, invite.href)
+  await onlineB.locator('.start-more summary').click()
   await onlineB.click('[data-action="mode:online"]') // deep link auto-joins the room
   await onlineB.waitForSelector('[data-screen="hud"].is-active', { timeout: 15000 })
   await onlineA.waitForFunction(() => window.__capball.onlineState?.ready && window.__capball.onlineTeam === 0, null, { timeout: 15000 })

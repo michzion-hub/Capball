@@ -19,6 +19,7 @@ export class UI {
   private bannerTimer = 0
   private captionTimer = 0
   private restartTimer = 0
+  private settingsReturnFocus: HTMLElement | null = null
 
   constructor(root: HTMLElement, private readonly handlers: UIHandlers) {
     this.root = root
@@ -32,6 +33,19 @@ export class UI {
     root.addEventListener('input', e => {
       const el = (e.target as HTMLElement).closest<HTMLElement>('[data-input]')
       if (el) this.handlers.action(`input:${el.dataset.input}`, el)
+    }, { signal: this.abort.signal })
+    root.addEventListener('keydown', e => {
+      const dialog = this.root.querySelector<HTMLElement>('[data-modal="settings"].is-active')
+      if (!dialog) return
+      if (e.key === 'Escape') { e.preventDefault(); this.modal(null); return }
+      if (e.key !== 'Tab') return
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        .filter(el => el.getClientRects().length > 0)
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
     }, { signal: this.abort.signal })
   }
 
@@ -56,8 +70,21 @@ export class UI {
   }
 
   modal(name: string | null): void {
-    for (const s of this.$$('[data-modal]')) s.classList.toggle('is-active', s.dataset.modal === name)
+    const current = this.root.querySelector<HTMLElement>('.modal.is-active')
+    if (name === 'settings' && !current) this.settingsReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    for (const s of this.$$('[data-modal]')) {
+      const active = s.dataset.modal === name
+      s.classList.toggle('is-active', active)
+      s.setAttribute('aria-hidden', String(!active))
+    }
     this.root.classList.toggle('has-modal', name !== null)
+    if (name === 'settings') {
+      this.$('[data-modal="settings"] [data-setting-switch]:not([disabled])').focus()
+    } else if (name === null && current?.dataset.modal === 'settings') {
+      const target = this.settingsReturnFocus
+      this.settingsReturnFocus = null
+      if (target?.isConnected) target.focus()
+    }
   }
 
   get modalOpen(): boolean { return this.root.classList.contains('has-modal') }
@@ -98,12 +125,30 @@ export class UI {
   }
 
   setSound(on: boolean): void {
+    this.setSettingSwitch('sound', on)
     for (const b of this.$$('[data-action="sound"]')) {
       b.classList.toggle('is-off', !on)
       b.setAttribute('aria-pressed', String(on))
       const l = b.querySelector('.lbl')
       if (l) l.textContent = on ? 'Sound on' : 'Sound off'
     }
+  }
+
+  setSettingSwitch(name: string, on: boolean): void {
+    const button = this.root.querySelector<HTMLButtonElement>(`[data-setting-switch="${name}"]`)
+    if (!button) return
+    button.setAttribute('aria-checked', String(on))
+    const state = button.querySelector<HTMLElement>('[data-setting-state]')
+    if (state) state.textContent = on ? 'On' : 'Off'
+  }
+
+  setSettingAvailable(name: string, available: boolean, unavailableText: string): void {
+    const button = this.root.querySelector<HTMLButtonElement>(`[data-setting-switch="${name}"]`)
+    if (!button) return
+    button.disabled = !available
+    button.setAttribute('aria-disabled', String(!available))
+    const description = this.root.querySelector<HTMLElement>(`[data-setting-description="${name}"]`)
+    if (description && !available) description.textContent = unavailableText
   }
 
   banner(text: string, color = '#ff5a1f', ms = 1400, big = false): void {
@@ -184,12 +229,12 @@ const TEMPLATE = /* html */ `
   <div class="start-wrap">
     <div class="tape tape-a"></div>
     <h1 class="logo" aria-label="CAPBALL"><span>CAP</span><span class="logo-cap" aria-hidden="true"></span><span>BALL</span></h1>
+    <button class="gear-button" type="button" data-action="settings" aria-label="Open settings" aria-haspopup="dialog" aria-controls="settings-modal" title="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.1a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8Zm8 4.8v-1.8l-2-.7a6.4 6.4 0 0 0-.6-1.4l.9-1.9-1.3-1.3-1.9.9a6.4 6.4 0 0 0-1.4-.6l-.7-2h-1.8l-.7 2a6.4 6.4 0 0 0-1.4.6l-1.9-.9-1.3 1.3.9 1.9a6.4 6.4 0 0 0-.6 1.4l-2 .7v1.8l2 .7a6.4 6.4 0 0 0 .6 1.4l-.9 1.9 1.3 1.3 1.9-.9a6.4 6.4 0 0 0 1.4.6l.7 2h1.8l.7-2a6.4 6.4 0 0 0 1.4-.6l1.9.9 1.3-1.3-.9-1.9a6.4 6.4 0 0 0 .6-1.4l2-.7Z"/></svg>
+      <span class="sr-only">Settings</span>
+    </button>
     <p class="tagline">Bottle-cap street football. Two thumbs, one table, no mercy.</p>
     <div class="start-menu" data-start-menu></div>
-    <div class="start-foot">
-      <button class="chip" data-action="rules">How to play</button>
-      <button class="chip" data-action="sound"><span class="lbl">Sound on</span></button>
-    </div>
   </div>
 </section>
 
@@ -233,6 +278,34 @@ const TEMPLATE = /* html */ `
     <h2>How to play</h2>
     <div class="rules-body" data-rules-body></div>
     <button class="btn" data-action="closemodal">Got it</button>
+  </div>
+</div>
+
+<div class="modal settings-modal" data-modal="settings" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
+  <div class="sheet settings-sheet">
+    <div class="tape tape-b"></div>
+    <span class="settings-kicker">Match atmosphere</span>
+    <h2 id="settings-title">Settings</h2>
+    <p class="settings-intro">Turn the sideline noise on or off.</p>
+    <div class="settings-list" data-settings-options>
+      <div class="setting-row" data-setting-row="commentary">
+        <div class="setting-copy"><span class="setting-title" id="setting-commentary-title">Commentary</span><span class="setting-description" id="setting-commentary-description" data-setting-description="commentary">On-screen match calls and captions.</span></div>
+        <button class="setting-switch" type="button" role="switch" data-setting-switch="commentary" data-action="toggle:commentary" aria-checked="true" aria-labelledby="setting-commentary-title" aria-describedby="setting-commentary-description"><span data-setting-state>On</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
+      </div>
+      <div class="setting-row" data-setting-row="speech">
+        <div class="setting-copy"><span class="setting-title" id="setting-speech-title">Voice</span><span class="setting-description" id="setting-speech-description" data-setting-description="speech">Spoken match commentary.</span></div>
+        <button class="setting-switch" type="button" role="switch" data-setting-switch="speech" data-action="toggle:speech" aria-checked="false" aria-labelledby="setting-speech-title" aria-describedby="setting-speech-description"><span data-setting-state>Off</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
+      </div>
+      <div class="setting-row" data-setting-row="sound">
+        <div class="setting-copy"><span class="setting-title" id="setting-sound-title">Sound</span><span class="setting-description" id="setting-sound-description" data-setting-description="sound">Whistles, impacts and crowd audio.</span></div>
+        <button class="setting-switch" type="button" role="switch" data-setting-switch="sound" data-action="toggle:sound" aria-checked="true" aria-labelledby="setting-sound-title" aria-describedby="setting-sound-description"><span data-setting-state>On</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
+      </div>
+      <div class="setting-row" data-setting-row="tuning" hidden>
+        <div class="setting-copy"><span class="setting-title" id="setting-tuning-title">Tuning Tools</span><span class="setting-description" id="setting-tuning-description" data-setting-description="tuning">Developer-only game tuning panel.</span></div>
+        <button class="setting-switch" type="button" role="switch" data-setting-switch="tuning" data-action="toggle:tuning" aria-checked="false" aria-labelledby="setting-tuning-title" aria-describedby="setting-tuning-description"><span data-setting-state>Off</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
+      </div>
+    </div>
+    <button class="btn settings-done" type="button" data-action="closemodal">Done</button>
   </div>
 </div>
 
