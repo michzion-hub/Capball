@@ -15,6 +15,7 @@ import type { Outcome, TrackerEvent, Whistle } from './game/play'
 import { HiddenPenalty, legalKeeperPosition } from './game/penalty'
 import { ReplayRecorder } from './game/replay'
 import type { ReplayClip } from './game/replay'
+import { MatchStatistics } from './game/summary'
 import { RIVAL_CREWS, Tournament } from './game/tournament'
 import type { Tie } from './game/tournament'
 import type { TurnReason } from './game/turns'
@@ -31,6 +32,7 @@ import type { Settings } from './store/settings'
 import { drawPreviews, editorHtml, resolveKits } from './ui/editor'
 import { buildRuleset, setupHtml } from './ui/setup'
 import { UI, esc } from './ui/ui'
+import type { MatchSummaryView } from './ui/ui'
 import { OnlineClient } from './net/client'
 import type { LinkState } from './net/client'
 import type { FlickMessage, NetworkState, ServerMessage } from './net/protocol'
@@ -43,7 +45,7 @@ export const TURN_LABEL: Record<TurnReason, string> = {
 
 type Mode = 'quick' | 'ai' | 'shootout' | 'tournament' | 'online'
 
-interface ReplayState { clip: ReplayClip; t: number }
+interface ReplayState { clip: ReplayClip; t: number; returnToSummary?: boolean }
 
 export class App {
   readonly canvas: HTMLCanvasElement
@@ -85,6 +87,10 @@ export class App {
   private matchUnsubs: (() => void)[] = []
   private recorder: ReplayRecorder | null = null
   private replay: ReplayState | null = null
+  private readonly matchStatistics = new MatchStatistics()
+  private lastGoalReplay: ReplayClip | null = null
+  private matchSummary: MatchSummaryView | null = null
+  private summaryActions = ''
   private goalHoldMs = -1
   private goalMark = 0
   private raf = 0
@@ -393,6 +399,7 @@ export class App {
     this.matchUnsubs.push(
       m.events.on('contact', c => this.onContact(c)),
       m.events.on('flick', f => {
+        this.matchStatistics.recordFlick(f.team, f.powerShot)
         this.audio.flick(f.power)
         if (Math.abs(f.spin) > 0.6 && f.power > 0.45 && Math.random() < 0.5) this.say('curler', {}, 1)
         if (f.powerShot) { this.ui.banner('POWER SHOT!', '#ff7a1f', 900); this.say('powerShot', {}, 2); this.shake.add(4) }
@@ -405,7 +412,7 @@ export class App {
       m.events.on('phase', p => { if (p.phase !== 'aim') this.input.cancel(); this.refreshActionButton() }),
       m.events.on('whistle', w => this.onWhistle(w)),
       m.events.on('restart', r => this.onRestart(r)),
-      m.events.on('play', e => this.onPlayEvent(e)),
+      m.events.on('play', e => { this.matchStatistics.recordPlay(e); this.onPlayEvent(e) }),
       m.events.on('half', h => { this.audio.whistle(true); this.ui.banner(h.half === 2 ? 'HALF TIME' : `HALF ${h.half}`, '#151515', 1800, true); this.say('halftime', {}, 3) }),
       m.events.on('kick', k => this.onKick(k.team, k.scored, k.saved)),
       m.events.on('step', s => this.onStep(s.dtMs)),
@@ -440,6 +447,10 @@ export class App {
     this.input.cancel()
     this.aim = null
     this.replay = null
+    this.matchStatistics.reset()
+    this.lastGoalReplay = null
+    this.matchSummary = null
+    this.summaryActions = ''
     this.goalHoldMs = -1
     this.ui.$('[data-replay]').hidden = true
     if (this.match) this.match.onFixedStep = null
@@ -459,6 +470,7 @@ export class App {
 
   private onGoal(scorer: TeamIndex, end: 0 | 1, ownGoal: boolean, goals: [number, number], capId: number | null): void {
     const m = this.match!
+    this.lastGoalReplay = null
     this.ui.setScore(goals)
     this.audio.horn()
     this.crowd.swell(1, 4)
@@ -480,9 +492,10 @@ export class App {
     const m = this.match
     if (!m || !this.recorder) return
     const clip = this.recorder.clipAround(this.goalMark, FX.replaySeconds, FX.replayTail)
+    this.lastGoalReplay = clip.duration >= 0.6 ? clip : null
     if (clip.duration < 0.6 || !this.settings.replays) { m.finishGoal(); return }
     m.enterReplay()
-    this.replay = { clip, t: 0 }
+    this.replay = { clip, t: 0, returnToSummary: false }
     this.ui.$('[data-replay]').hidden = false
     this.crowd.swell(0.5, 3)
   }
@@ -492,9 +505,24 @@ export class App {
 
   private endReplay(): void {
     if (!this.replay) return
+    const returnToSummary = this.replay.returnToSummary ?? false
     this.replay = null
     this.ui.$('[data-replay]').hidden = true
-    this.match?.finishGoal()
+    if (returnToSummary) this.showMatchSummary()
+    else this.match?.finishGoal()
+  }
+
+  private playLastGoalReplay(): void {
+    if (!this.match || this.match.phase !== 'over' || !this.matchSummary || !this.lastGoalReplay) return
+    this.ui.modal(null)
+    this.replay = { clip: this.lastGoalReplay, t: 0, returnToSummary: true }
+    this.ui.$('[data-replay]').hidden = false
+    this.crowd.swell(0.35, 1.5)
+  }
+
+  private showMatchSummary(): void {
+    if (!this.matchSummary) return
+    this.ui.showMatchSummary({ ...this.matchSummary, replayAvailable: this.lastGoalReplay !== null }, this.summaryActions)
   }
 
   private onTurn(team: TeamIndex, reason: TurnReason): void {
@@ -795,7 +823,6 @@ export class App {
     this.crowd.swell(team === null ? 0.4 : 0.9, 4)
     this.ui.setTurn(null, this.teams, '')
     const d = this.teams
-    const score = `${goals[0]} – ${goals[1]}${reason === 'shootout' ? ' on penalties' : ''}`
     this.say(team === null ? 'draw' : 'win', { team: team === null ? '' : d[team].name, score: `${goals[0]}–${goals[1]}` }, 3)
     let actions = '<button class="btn" data-action="restart">Rematch</button><button class="btn ghost" data-action="newmatch">New match</button>'
     let title = team === null ? 'Honours even' : `${d[team].name} win!`
@@ -817,8 +844,28 @@ export class App {
         actions = '<button class="btn" data-action="bracket">Continue</button>'
       }
     }
-    this.ui.html('[data-win-actions]', actions)
-    this.ui.showWinner(title, score, team === null ? '#888888' : d[team].primary)
+    const stats = this.matchStatistics.snapshot()
+    const modeLabels: Record<Mode, string> = {
+      quick: 'Quick Match', ai: 'Street match vs AI', shootout: 'Penalty Shootout', tournament: 'Street Tournament', online: 'Online Match',
+    }
+    this.summaryActions = actions
+    this.matchSummary = {
+      headline: title,
+      teams: [d[0].name, d[1].name],
+      score: [goals[0], goals[1]],
+      scoreLabel: reason === 'shootout' ? 'Penalty shootout score' : 'Final score',
+      mode: modeLabels[this.mode],
+      duration: fmtClock(Math.floor(stats.elapsedMs / 1000)),
+      color: team === null ? '#888888' : d[team].primary,
+      stats: [
+        { label: 'Flicks', values: stats.flicks },
+        { label: 'Power shots', values: stats.powerShots },
+        { label: 'Completed passes', values: stats.passes },
+        { label: 'Board bonuses', values: stats.boardBonuses },
+      ],
+      replayAvailable: this.lastGoalReplay !== null,
+    }
+    this.showMatchSummary()
     if (team !== null) this.particles.confetti(PITCH.width / 2, PITCH.height / 2, team === 0 ? 1 : -1, 160, [d[team].primary, d[team].secondary, '#fff'])
   }
 
@@ -1100,6 +1147,7 @@ export class App {
       case 'resume': this.ui.modal(null); break
       case 'concede-match': this.confirmAction = 'concede'; this.ui.$('[data-confirm-title]').textContent = 'Concede the match?'; this.ui.$('[data-confirm-text]').textContent = 'The other player will be awarded the win.'; this.ui.modal('confirm'); break
       case 'skipreplay': this.endReplay(); break
+      case 'replay-last-goal': this.playLastGoalReplay(); break
       case 'online-copy': void this.copyOnlineInvite(); break
       case 'online-leave': this.toMenu(); break
       case 'playtie': this.playTie(); break
@@ -1109,6 +1157,11 @@ export class App {
         if (!this.match) return
         if (this.mode === 'online') { this.ui.caption('Leave this room to start a new match.', 2500); break }
         this.ui.modal(null)
+        this.matchStatistics.reset()
+        this.lastGoalReplay = null
+        this.matchSummary = null
+        this.summaryActions = ''
+        this.ui.$('[data-summary-replay]').hidden = true
         window.clearTimeout(this.penaltyRevealTimer)
         this.penaltyRevealTimer = 0
         this.hiddenPenalty?.finish()
@@ -1253,6 +1306,7 @@ export class App {
 
   private tick(m: Match, dt: number): void {
     const s = dt / 1000
+    if (this.live && m.phase !== 'over' && !this.replay) this.matchStatistics.advance(dt)
     if (this.replay) {
       this.replay.t += s * FX.replaySpeed
       if (this.replay.t >= this.replay.clip.duration) this.endReplay()

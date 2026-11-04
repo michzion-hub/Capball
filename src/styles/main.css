@@ -427,3 +427,84 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
 @media (prefers-reduced-motion: reduce) {
   .screen-start *, .settings-modal .sheet * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+
+/* ---------- full-time summary ---------- */
+.match-summary.sheet {
+  width: min(100%, 620px);
+  max-height: calc(100dvh - 32px - var(--safe-t) - var(--safe-b));
+  padding: 26px 26px 22px;
+  transform: rotate(.35deg);
+}
+.match-summary .win-title {
+  margin: 2px 0 12px;
+  font-size: clamp(36px, 7vw, 58px) !important;
+  line-height: 1.02;
+  overflow-wrap: anywhere;
+}
+.summary-mode { display: inline-block; margin-left: 8px; color: #56504a; font: 14px var(--body); letter-spacing: .04em; text-transform: uppercase; }
+.summary-score {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-block: 3px solid var(--ink);
+}
+.summary-side { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
+.summary-side span { font: 16px/1.2 var(--hand); overflow-wrap: anywhere; }
+.summary-side strong { font: 52px/1 var(--display); }
+.summary-side:last-child { grid-template-columns: auto minmax(0, 1fr); }
+.summary-side:last-child strong { grid-column: 1; grid-row: 1; }
+.summary-side:last-child span { grid-column: 2; grid-row: 1; }
+.summary-divider { font: 32px var(--display); }
+.summary-score-label { margin: 4px 0 8px; color: #48433d; font: 15px var(--hand); text-transform: uppercase; }
+.summary-duration { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0; font-size: 16px; }
+.summary-duration strong { font: 22px var(--display); }
+.summary-stats { width: 100%; border-collapse: collapse; margin: 10px 0 4px; font-size: 16px; }
+.summary-stats th, .summary-stats td { padding: 7px 8px; border-top: 1px solid rgba(21, 20, 18, .24); }
+.summary-stats thead th { font: 15px/1.15 var(--hand); overflow-wrap: anywhere; }
+.summary-stats thead th:first-child, .summary-stats tbody th { text-align: left; }
+.summary-stats thead th:not(:first-child), .summary-stats td { text-align: right; }
+.summary-stats tbody th { font-weight: 500; }
+.summary-stats td { font: 19px var(--display); }
+.sheet .summary-replay { display: block; width: 100%; min-height: 48px; margin: 12px 0 4px; }
+.summary-replay[hidden] { display: none !important; }
+.match-summary .win-actions { gap: 10px; margin-top: 8px; }
+.match-summary .win-actions .btn { flex: 1 1 140px; min-height: 48px; }
+
+@media (max-width: 480px) {
+  .match-summary.sheet { padding: 20px 16px 16px; max-height: calc(100dvh - 24px - var(--safe-t) - var(--safe-b)); }
+  .summary-score { gap: 6px; }
+  .summary-side { gap: 5px; }
+  .summary-side span { font-size: 15px; }
+  .summary-side strong { font-size: 44px; }
+  .summary-divider { font-size: 27px; }
+  .summary-stats th, .summary-stats td { padding: 6px 5px; }
+  .summary-stats thead th { font-size: 14px; }
+}
+
+@media (max-height: 560px) and (orientation: landscape) {
+  .match-summary.sheet {
+    width: min(100%, 760px); max-width: 760px;
+    max-height: calc(100dvh - 16px - var(--safe-t) - var(--safe-b)); padding: 12px 18px;
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas: "kicker kicker" "title title" "score stats" "label stats" "duration stats" "replay actions";
+    align-content: center; align-items: center; column-gap: 18px; row-gap: 1px;
+  }
+  .match-summary .win-kicker { grid-area: kicker; }
+  .match-summary .win-title { grid-area: title; margin: 0 0 4px; font-size: 34px !important; }
+  .match-summary .win-kicker { font-size: 15px; }
+  .match-summary .summary-score { grid-area: score; padding: 4px 0; gap: 5px; }
+  .match-summary .summary-score-label { grid-area: label; margin: 2px 0; }
+  .match-summary .summary-duration { grid-area: duration; margin: 2px 0; }
+  .match-summary .summary-stats { grid-area: stats; margin: 2px 0; }
+  .match-summary .summary-replay { grid-area: replay; align-self: end; }
+  .match-summary .win-actions { grid-area: actions; align-self: end; margin: 0; }
+  .summary-side strong { font-size: 38px; }
+  .match-summary .summary-stats th, .match-summary .summary-stats td { padding: 3px 5px; }
+  .match-summary .summary-stats thead th { font-size: 13px; }
+  .match-summary .summary-stats td { font-size: 17px; }
+  .sheet .summary-replay { min-height: 44px; margin: 0; }
+  .match-summary .win-actions .btn { min-height: 44px; margin-top: 0; }
+}

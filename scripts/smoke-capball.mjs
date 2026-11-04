@@ -223,6 +223,40 @@ try {
   await page.waitForTimeout(400)
   await page.screenshot({ path: `${out}/06-winner.png` })
   if (Math.max(...s.goals) !== 3) throw new Error(`winner without 3 goals: ${s.goals}`)
+  const fullTime = await page.evaluate(() => ({
+    mode: document.querySelector('[data-summary-mode]')?.textContent,
+    score: [...document.querySelectorAll('[data-summary-score]')].map(el => el.textContent),
+    rows: [...document.querySelectorAll('[data-summary-stats] tr')].map(row => row.textContent?.replace(/\s+/g, ' ').trim()),
+    replay: !document.querySelector('[data-summary-replay]').hidden,
+    phase: window.__capball.match.phase,
+  }))
+  if (fullTime.mode !== 'Quick Match' || JSON.stringify(fullTime.score) !== JSON.stringify(s.goals.map(String)) || fullTime.rows.length !== 4 || !fullTime.replay || fullTime.phase !== 'over') throw new Error(`match summary or last-goal action missing: ${JSON.stringify(fullTime)}`)
+  await page.screenshot({ path: `${out}/06-match-summary.png` })
+  for (const [label, width, height] of [['portrait', 390, 844], ['landscape', 844, 390]]) {
+    await page.setViewportSize({ width, height })
+    await page.waitForTimeout(120)
+    const bounds = await page.locator('[data-modal="winner"] .match-summary').evaluate(el => {
+      const r = el.getBoundingClientRect()
+      const replay = el.querySelector('[data-summary-replay]').getBoundingClientRect()
+      const actions = el.querySelector('[data-win-actions]').getBoundingClientRect()
+      return { top: r.top, bottom: r.bottom, height: r.height, scroll: el.scrollHeight - el.clientHeight, replayBottom: replay.bottom, actionsBottom: actions.bottom, viewport: innerHeight }
+    })
+    if (bounds.top < -1 || bounds.bottom > height + 1) throw new Error(`${label} summary card clips outside the phone viewport: ${JSON.stringify(bounds)}`)
+    if (bounds.replayBottom > height + 1 || bounds.actionsBottom > height + 1 || (label === 'landscape' && bounds.scroll > 8)) throw new Error(`${label} summary actions require scrolling or are clipped: ${JSON.stringify(bounds)}`)
+    await page.screenshot({ path: `${out}/06-summary-phone-${label}.png` })
+  }
+  await page.setViewportSize({ width: 1280, height: 760 })
+  await page.click('[data-summary-replay]')
+  await waitForFunction(page, () => window.__capball.replay?.returnToSummary === true, 5000)
+  const finalScore = [...s.goals]
+  await waitForFunction(page, () => window.__capball.replay === null && document.querySelector('[data-modal="winner"].is-active'), 20000)
+  if (JSON.stringify((await state(page)).goals) !== JSON.stringify(finalScore)) throw new Error('summary replay mutated the completed match score')
+  // The user can also skip a replay and return to the same summary card immediately.
+  await page.click('[data-summary-replay]')
+  await waitForFunction(page, () => window.__capball.replay?.returnToSummary === true, 5000)
+  await page.click('[data-replay]')
+  await page.waitForSelector('[data-modal="winner"].is-active')
+  if (JSON.stringify((await state(page)).goals) !== JSON.stringify(finalScore)) throw new Error('skipping the last-goal replay did not preserve the finished result')
   await page.click('[data-modal="winner"] [data-action="restart"]')
   s = await state(page)
   if (s.goals[0] !== 0 || s.goals[1] !== 0 || s.phase !== 'aim') throw new Error(`restart failed ${JSON.stringify(s)}`)
@@ -404,9 +438,16 @@ try {
   const tally = await page.evaluate(() => window.__capball.match.shootout.kicks)
   if (tally[0].length !== 1) throw new Error(`kick not recorded: ${JSON.stringify(tally)}`)
   await page.screenshot({ path: `${out}/17-shootout-after.png` })
+  await page.evaluate(() => {
+    const m = window.__capball.match
+    m.events.emit('win', { team: 0, score: m.score, reason: 'shootout' })
+  })
+  await page.waitForSelector('[data-modal="winner"].is-active')
+  const shootoutSummary = await page.evaluate(() => ({ label: document.querySelector('[data-summary-label]')?.textContent, replayHidden: document.querySelector('[data-summary-replay]').hidden }))
+  if (shootoutSummary.label !== 'Penalty shootout score' || !shootoutSummary.replayHidden) throw new Error(`shootout summary labels/replay mismatch: ${JSON.stringify(shootoutSummary)}`)
 
   // ---------- Phase 3: tournament ----------
-  await page.click('.hud-tools [data-action="newmatch"]')
+  await page.click('[data-modal="winner"] [data-action="newmatch"]')
   await page.click('[data-action="mode:tournament"]')
   await page.waitForSelector('[data-screen="setup"].is-active')
   await page.click('[data-screen="setup"] [data-action="go"]')

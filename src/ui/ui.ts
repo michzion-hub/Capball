@@ -7,6 +7,23 @@ export interface UIHandlers {
   action(name: Action, el: HTMLElement): void
 }
 
+export interface SummaryStatRow {
+  label: string
+  values: [number, number]
+}
+
+export interface MatchSummaryView {
+  headline: string
+  teams: [string, string]
+  score: [number, number]
+  scoreLabel: string
+  mode: string
+  duration: string
+  color: string
+  stats: SummaryStatRow[]
+  replayAvailable: boolean
+}
+
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
 
 /**
@@ -35,9 +52,13 @@ export class UI {
       if (el) this.handlers.action(`input:${el.dataset.input}`, el)
     }, { signal: this.abort.signal })
     root.addEventListener('keydown', e => {
-      const dialog = this.root.querySelector<HTMLElement>('[data-modal="settings"].is-active')
+      const dialog = this.root.querySelector<HTMLElement>('[data-modal="settings"].is-active, [data-modal="winner"].is-active')
       if (!dialog) return
-      if (e.key === 'Escape') { e.preventDefault(); this.modal(null); return }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        if (dialog.dataset.modal === 'settings') this.modal(null)
+        return
+      }
       if (e.key !== 'Tab') return
       const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])')]
         .filter(el => el.getClientRects().length > 0)
@@ -203,12 +224,38 @@ export class UI {
     this.modal('penalty-reveal')
   }
 
-  showWinner(title: string, sub: string, color: string): void {
-    const w = this.$('[data-modal="winner"]')
-    w.style.setProperty('--team', color)
-    w.querySelector('.win-title')!.textContent = title
-    w.querySelector('.win-sub')!.textContent = sub
+  showMatchSummary(view: MatchSummaryView, actions: string): void {
+    const modal = this.$('[data-modal="winner"]')
+    modal.style.setProperty('--team', view.color)
+    modal.querySelector<HTMLElement>('[data-summary-title]')!.textContent = view.headline
+    modal.querySelector<HTMLElement>('[data-summary-mode]')!.textContent = view.mode
+    modal.querySelector<HTMLElement>('[data-summary-duration]')!.textContent = view.duration
+    modal.querySelector<HTMLElement>('[data-summary-label]')!.textContent = view.scoreLabel
+    modal.setAttribute('aria-label', `${view.headline}. ${view.teams[0]} ${view.score[0]}, ${view.teams[1]} ${view.score[1]}.`)
+    for (const team of [0, 1] as const) {
+      modal.querySelector<HTMLElement>(`[data-summary-team="${team}"]`)!.textContent = view.teams[team]
+      modal.querySelector<HTMLElement>(`[data-summary-column="${team}"]`)!.textContent = view.teams[team]
+      modal.querySelector<HTMLElement>(`[data-summary-score="${team}"]`)!.textContent = String(view.score[team])
+    }
+    const body = modal.querySelector<HTMLTableSectionElement>('[data-summary-stats]')!
+    body.replaceChildren(...view.stats.map(stat => {
+      const row = document.createElement('tr')
+      const label = document.createElement('th')
+      label.scope = 'row'
+      label.textContent = stat.label
+      row.append(label)
+      for (const value of stat.values) {
+        const cell = document.createElement('td')
+        cell.textContent = String(value)
+        row.append(cell)
+      }
+      return row
+    }))
+    const replay = modal.querySelector<HTMLButtonElement>('[data-summary-replay]')!
+    replay.hidden = !view.replayAvailable
+    this.html('[data-win-actions]', actions)
     this.modal('winner')
+    ;(view.replayAvailable ? replay : modal.querySelector<HTMLButtonElement>('[data-win-actions] button'))?.focus()
   }
 
   html(sel: string, markup: string): void { this.$(sel).innerHTML = markup }
@@ -309,16 +356,24 @@ const TEMPLATE = /* html */ `
   </div>
 </div>
 
-<div class="modal" data-modal="winner" role="dialog" aria-label="Full time">
-  <div class="sheet win">
+<div class="modal" data-modal="winner" role="dialog" aria-modal="true" aria-labelledby="summary-title" aria-hidden="true">
+  <div class="sheet win match-summary">
     <div class="tape tape-a"></div>
-    <p class="win-kicker">Full time</p>
-    <h2 class="win-title"></h2>
-    <p class="win-sub"></p>
-    <div class="win-actions" data-win-actions>
-      <button class="btn" data-action="restart">Rematch</button>
-      <button class="btn ghost" data-action="newmatch">New match</button>
+    <p class="win-kicker">Full time <span class="summary-mode" data-summary-mode></span></p>
+    <h2 class="win-title" id="summary-title" data-summary-title></h2>
+    <div class="summary-score" aria-label="Final score">
+      <div class="summary-side"><span data-summary-team="0"></span><strong data-summary-score="0">0</strong></div>
+      <span class="summary-divider" aria-hidden="true">–</span>
+      <div class="summary-side"><span data-summary-team="1"></span><strong data-summary-score="1">0</strong></div>
     </div>
+    <p class="summary-score-label" data-summary-label>Final score</p>
+    <p class="summary-duration">Match time <strong data-summary-duration>0:00</strong></p>
+    <table class="summary-stats" aria-label="Match statistics">
+      <thead><tr><th scope="col">Match stats</th><th scope="col" data-summary-column="0"></th><th scope="col" data-summary-column="1"></th></tr></thead>
+      <tbody data-summary-stats></tbody>
+    </table>
+    <button class="btn ghost summary-replay" data-action="replay-last-goal" data-summary-replay hidden>Replay last goal</button>
+    <div class="win-actions" data-win-actions></div>
   </div>
 </div>
 

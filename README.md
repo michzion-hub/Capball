@@ -41,6 +41,10 @@ The default ruleset enables goal-kick clearance, advantage and keeper-box limits
 
 Turn on **Hidden penalties** in Quick Match or Tournament setup for a local pass-the-device commit–reveal. The keeper chooses along the goal line (or inside the goal area if enabled), locks the position, and the next player receives an opaque handoff cover. The shooter stages one normal drag-back flick and locks it; only then are both choices revealed and the flick enters the existing physics simulation. The staged direction and power remain local and are not sent through the online protocol. Each chooser has a 12-second timer. Shooter timeout can be set to a straight shot or a deliberate forfeit. Portrait HUD controls are arranged for thumb reach; interactive targets are at least 44px high, and the viewport blocks page scroll and zoom during play.
 
+### Match summaries and replays
+
+At full time, CAPBALL shows both custom team names, the final score and result, match mode, active match duration, and side-by-side counts for flicks, power shots, completed passes and board-bonus plays. A shootout is explicitly labelled as a penalty score. The summary keeps the correct next step for quick matches, tournament rounds and online rooms. If a goal clip remains in the bounded replay recorder, **Replay last goal** plays those captured poses without advancing the finished match or mutating its physics; the replay can finish naturally or be skipped to return to the scorecard. No replay action is shown when there is no recorded goal clip.
+
 ### Friction
 
 Friction is applied **once**. Matter's own `frictionAir` and `friction` are 0, and `physics/world.ts` applies a single Coulomb-style sliding friction each fixed step (constant deceleration = `grip × surface.frictionScale`). Bodies slow down and stop crisply, with no long exponential creep. The same per-step hook adds the slope acceleration on The Hill. Nothing moves a fixed distance during play; positions are only written between plays (kickoffs and set pieces).
@@ -53,7 +57,7 @@ src/
   physics/     world.ts (Matter world, bodies, flick impulse, friction, contacts), settle.ts (pure)
   game/        match.ts (orchestrator), turns.ts (state machine), rules.ts (goal latch, scoring),
                play.ts (per-play tracker: fouls, advantage, offside, corners, board bonus, pass chains),
-               setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, emitter.ts
+               setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, summary.ts, emitter.ts
   input/       flick.ts (pointer events, drag-back aim + off-centre spin), penalty.ts (private keeper drag + local multi-touch guard)
   debug/       tunables.ts (live parameter catalog + export/reset, pure), overlay.ts (tuning panel + debug drawing)
   render/      renderer.ts, surfaces.ts (procedural pitches), capArt.ts (caps + sprite cache), view.ts
