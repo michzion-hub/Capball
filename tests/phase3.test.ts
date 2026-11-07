@@ -171,7 +171,7 @@ describe('commentary, kits, settings, particles', () => {
     expect(resolveKits(home, defaultTeam(1))[1]).toEqual(defaultTeam(1))
   })
   it('stored settings are sanitised field by field', () => {
-    const bad = JSON.stringify({ sound: 'yes', teams: [{ name: '<b>x</b>'.repeat(10), primary: 'red', numbers: ['123', '$$'] }], flags: { corners: true, evil: 'x' } })
+    const bad = JSON.stringify({ sound: 'yes', teams: [{ name: '<b>x</b>'.repeat(10), primary: 'red', numbers: ['123', '$$'] }], flags: { corners: true, evil: 'x' }, tutorialPrompted: 'yes', tutorialStep: 99, ruleHintsSeen: { goalKick: true, corner: 'yes', shootout: true, evil: true } })
     const s = loadSettings({ getItem: () => bad })
     expect(s.sound).toBe(true)
     expect(s.teams[0].name.length).toBeLessThanOrEqual(18)
@@ -179,7 +179,16 @@ describe('commentary, kits, settings, particles', () => {
     expect(s.teams[0].numbers[0]).toBe('12')
     expect(s.teams[0].numbers[1]).toBe(defaultTeam(0).numbers[1])
     expect(s.flags).toEqual({ corners: true })
+    expect(s.tutorialPrompted).toBe(false)
+    expect(s.tutorialStep).toBe(7)
+    expect(s.ruleHintsSeen).toEqual({ goalKick: true, shootout: true })
     expect(loadSettings({ getItem: () => '{not json' }).ruleset).toBe('street')
+  })
+  it('migrates older saves without tutorial metadata to clean defaults', () => {
+    const legacy = loadSettings({ getItem: () => JSON.stringify({ sound: false, ruleset: 'street' }) })
+    expect(legacy.tutorialPrompted).toBe(false)
+    expect(legacy.tutorialStep).toBe(0)
+    expect(legacy.ruleHintsSeen).toEqual({})
   })
   it('particle pool never grows past its cap', () => {
     const p = new Particles(50)

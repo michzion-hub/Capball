@@ -1,6 +1,7 @@
 import { TEAM_DEFAULTS } from '../config/tuning'
 import type { AiLevel } from '../config/tuning'
 import type { PenaltyTimeoutAction } from '../config/football'
+import type { RuleHintKey } from '../game/ruleHints'
 import { PATTERNS } from '../render/capArt'
 import type { Pattern, TeamDesign } from '../render/capArt'
 
@@ -20,6 +21,9 @@ export interface Settings {
   flags: Record<string, boolean>
   aiLevel: AiLevel
   penaltyTimeout: PenaltyTimeoutAction
+  tutorialPrompted: boolean
+  tutorialStep: number
+  ruleHintsSeen: Partial<Record<RuleHintKey, boolean>>
 }
 
 const DEFAULT_CAP_NAMES: [string[], string[]] = [
@@ -33,7 +37,7 @@ export function defaultTeam(i: 0 | 1): TeamDesign {
 }
 
 export function defaultSettings(): Settings {
-  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium', penaltyTimeout: 'straight' }
+  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium', penaltyTimeout: 'straight', tutorialPrompted: false, tutorialStep: 0, ruleHintsSeen: {} }
 }
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -73,6 +77,11 @@ export function loadSettings(storage: Pick<Storage, 'getItem'> | null = safeStor
       flags: p.flags && typeof p.flags === 'object' ? Object.fromEntries(Object.entries(p.flags).filter(([, v]) => typeof v === 'boolean')) : {},
       aiLevel: p.aiLevel === 'easy' || p.aiLevel === 'hard' ? p.aiLevel : 'medium',
       penaltyTimeout: p.penaltyTimeout === 'forfeit' ? 'forfeit' : 'straight',
+      tutorialPrompted: typeof p.tutorialPrompted === 'boolean' ? p.tutorialPrompted : d.tutorialPrompted,
+      tutorialStep: typeof p.tutorialStep === 'number' && Number.isFinite(p.tutorialStep) ? Math.max(0, Math.min(7, Math.floor(p.tutorialStep))) : d.tutorialStep,
+      ruleHintsSeen: p.ruleHintsSeen && typeof p.ruleHintsSeen === 'object'
+        ? Object.fromEntries((['goalKick', 'corner', 'foul', 'offside', 'penalty', 'shootout'] as const).filter(key => p.ruleHintsSeen?.[key] === true).map(key => [key, true]))
+        : {},
     }
   } catch {
     return d

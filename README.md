@@ -49,6 +49,12 @@ At full time, CAPBALL shows both custom team names, the final score and result, 
 
 Friction is applied **once**. Matter's own `frictionAir` and `friction` are 0, and `physics/world.ts` applies a single Coulomb-style sliding friction each fixed step (constant deceleration = `grip × surface.frictionScale`). Bodies slow down and stop crisply, with no long exponential creep. The same per-step hook adds the slope acceleration on The Hill. Nothing moves a fixed distance during play; positions are only written between plays (kickoffs and set pieces).
 
+## First-match tutorial
+
+The optional, solo **Learn CAPBALL** practice mode teaches real flick control, settling, board rebounds, the bonus flick, pass chains, power shots and cap types in short stages. It uses the same Matter.js simulation and pointer input as a match; tutorial progress is event-driven and saved locally, so players can pause, leave, resume after reload, skip a drill or replay the tutorial from the start. The other side does not take turns in this mode, and tutorial-only repositioning happens only after play settles. Quick Match offers a one-time learn-or-skip prompt.
+
+The first real encounter with a goal kick, corner, foul/free kick, offside or penalty can show a concise, dismissible referee card explaining the call, why it happened, who restarts and the key restriction. Dismissal is remembered per rule on that device; hidden penalties display the explanation before either player makes a private choice.
+
 ## Architecture
 
 ```
@@ -57,7 +63,8 @@ src/
   physics/     world.ts (Matter world, bodies, flick impulse, friction, contacts), settle.ts (pure)
   game/        match.ts (orchestrator), turns.ts (state machine), rules.ts (goal latch, scoring),
                play.ts (per-play tracker: fouls, advantage, offside, corners, board bonus, pass chains),
-               setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, summary.ts, emitter.ts
+               setpieces.ts, formation.ts, deadball.ts, shootout.ts, tournament.ts, replay.ts, summary.ts,
+               tutorial.ts (event-driven practice lessons), ruleHints.ts (first-encounter restart explanations), emitter.ts
   input/       flick.ts (pointer events, drag-back aim + off-centre spin), penalty.ts (private keeper drag + local multi-touch guard)
   debug/       tunables.ts (live parameter catalog + export/reset, pure), overlay.ts (tuning panel + debug drawing)
   render/      renderer.ts, surfaces.ts (procedural pitches), capArt.ts (caps + sprite cache), view.ts

@@ -2,20 +2,24 @@ import { Audio } from './audio/audio'
 import { Commentator, Voice } from './audio/commentary'
 import type { CallKind, CallVars } from './audio/commentary'
 import { Crowd } from './audio/crowd'
-import { RULESETS } from './config/rulesets'
+import { RULESETS, TUTORIAL_RULESET } from './config/rulesets'
 import type { Ruleset } from './config/rulesets'
-import { AI, CAP_TYPES, FX, INPUT, PITCH, SURFACES } from './config/tuning'
+import { AI, BALL, CAP_TYPES, FX, INPUT, PITCH, SURFACES } from './config/tuning'
 import { FOOTBALL } from './config/football'
 import type { AiLevel, SurfaceId } from './config/tuning'
 import { AiBrain, captureBoard } from './ai/brain'
 import type { Decision } from './ai/brain'
 import { Particles, Shake } from './fx/effects'
 import { Match } from './game/match'
+import { newPossession } from './game/play'
 import type { Outcome, TrackerEvent, Whistle } from './game/play'
 import { HiddenPenalty, legalKeeperPosition } from './game/penalty'
 import { ReplayRecorder } from './game/replay'
 import type { ReplayClip } from './game/replay'
 import { MatchStatistics } from './game/summary'
+import { TutorialProgress, TUTORIAL_COMPLETE_STEP, TUTORIAL_STEPS } from './game/tutorial'
+import { makeRuleHint } from './game/ruleHints'
+import type { RuleHintKey } from './game/ruleHints'
 import { RIVAL_CREWS, Tournament } from './game/tournament'
 import type { Tie } from './game/tournament'
 import type { TurnReason } from './game/turns'
@@ -32,7 +36,7 @@ import type { Settings } from './store/settings'
 import { drawPreviews, editorHtml, resolveKits } from './ui/editor'
 import { buildRuleset, setupHtml } from './ui/setup'
 import { UI, esc } from './ui/ui'
-import type { MatchSummaryView } from './ui/ui'
+import type { MatchSummaryView, TutorialCoachView } from './ui/ui'
 import { OnlineClient } from './net/client'
 import type { LinkState } from './net/client'
 import type { FlickMessage, NetworkState, ServerMessage } from './net/protocol'
@@ -43,7 +47,7 @@ export const TURN_LABEL: Record<TurnReason, string> = {
   keeper: 'slide your keeper', shootout: 'take the penalty',
 }
 
-type Mode = 'quick' | 'ai' | 'shootout' | 'tournament' | 'online'
+type Mode = 'quick' | 'ai' | 'shootout' | 'tournament' | 'online' | 'tutorial'
 
 interface ReplayState { clip: ReplayClip; t: number; returnToSummary?: boolean }
 
@@ -91,6 +95,12 @@ export class App {
   private lastGoalReplay: ReplayClip | null = null
   private matchSummary: MatchSummaryView | null = null
   private summaryActions = ''
+  private tutorialGuide: TutorialProgress | null = null
+  private tutorialStageSignature = ''
+  private tutorialTarget: Vec | null = null
+  private tutorialPickCapId: number | null = null
+  private lastRuleWhistle: Whistle | null = null
+  private pendingRuleHint: RuleHintKey | null = null
   private goalHoldMs = -1
   private goalMark = 0
   private raf = 0
@@ -119,6 +129,7 @@ export class App {
     this.renderer.overLayers.push(ctx => this.particles.draw(ctx, [1, 2]))
     this.renderer.overLayers.push(ctx => this.tune.drawWorld(ctx, this.renderer.view))
     this.renderer.overLayers.push(ctx => this.drawOutMark(ctx))
+    this.renderer.overLayers.push(ctx => this.drawTutorialTarget(ctx))
     this.ui = new UI(uiRoot, { action: (a, el) => this.onAction(a, el) })
     this.onlineClient = new OnlineClient({
       status: (state, detail) => this.onOnlineStatus(state, detail),
@@ -173,6 +184,7 @@ export class App {
   }
 
   private renderStartMenu(): void {
+    const tutorialLabel = this.settings.tutorialStep >= TUTORIAL_COMPLETE_STEP ? 'Replay tutorial' : this.settings.tutorialStep > 0 ? 'Resume tutorial' : 'Learn CAPBALL'
     this.ui.html('[data-start-menu]', `
       <div class="start-main-actions" role="group" aria-label="Main game modes">
         <button class="btn menu-main menu-primary" data-main-mode="quick" data-action="mode:quick">Quick Match</button>
@@ -186,11 +198,241 @@ export class App {
       <details class="start-more">
         <summary>Other modes &amp; help</summary>
         <div class="start-more-actions">
+          <button class="chip" data-action="tutorial:entry">${tutorialLabel}</button>
           <button class="chip" data-action="rules">How to play</button>
           <button class="chip" data-action="mode:ai">Play the AI</button>
           <button class="chip" data-action="mode:online">Online · invite a mate</button>
         </div>
       </details>`)
+  }
+
+  private startTutorial(replayFromStart = false): void {
+    this.mode = 'tutorial'
+    this.tournament = null
+    this.currentTie = null
+    this.pendingTie = null
+    if (replayFromStart) this.settings.tutorialStep = 0
+    this.settings.tutorialPrompted = true
+    saveSettings(this.settings)
+    this.tutorialGuide = new TutorialProgress(this.settings.tutorialStep)
+    this.tutorialStageSignature = ''
+    this.startMatch(TUTORIAL_RULESET, 'park')
+    this.syncTutorialCoach()
+  }
+
+  private skipTutorialPrompt(): void {
+    this.settings.tutorialPrompted = true
+    saveSettings(this.settings)
+    this.mode = 'quick'
+    this.ui.modal(null)
+    this.openSetup()
+  }
+
+  private leaveTutorial(): void {
+    if (this.tutorialGuide) this.settings.tutorialStep = this.tutorialGuide.step
+    saveSettings(this.settings)
+    this.tutorialGuide = null
+    this.tutorialStageSignature = ''
+    this.mode = 'quick'
+    this.toMenu()
+  }
+
+  private finishTutorial(): void {
+    const guide = this.tutorialGuide
+    const m = this.match
+    if (!guide?.complete || !m || m.phase !== 'aim' || !m.world.isAtRest()) return
+    this.settings.tutorialStep = TUTORIAL_COMPLETE_STEP
+    saveSettings(this.settings)
+    this.ui.setTutorialCoach(null)
+    this.ui.showTutorialComplete()
+  }
+
+  private tutorialProgressChanged(): void {
+    const guide = this.tutorialGuide
+    if (!guide) return
+    this.settings.tutorialStep = guide.step
+    saveSettings(this.settings)
+    this.syncTutorialCoach()
+    if (guide.complete) this.ui.caption('Practice complete · let the play settle for a moment.', 1800)
+  }
+
+  private retryTutorialDrill(): void {
+    const guide = this.tutorialGuide
+    const m = this.match
+    if (this.mode !== 'tutorial' || !guide || guide.complete || !m || m.phase !== 'aim' || !m.world.isAtRest() || this.ui.modalOpen) return
+    guide.retry()
+    this.tutorialStageSignature = ''
+    if (guide.step < 3) {
+      // The opening controls drills use the real kickoff formation and reset only at rest.
+      m.restart()
+      return
+    }
+    this.stageTutorialScenario()
+    this.syncTutorialCoach()
+  }
+
+  private skipTutorialDrill(): void {
+    const guide = this.tutorialGuide
+    const m = this.match
+    if (this.mode !== 'tutorial' || !guide || guide.complete || !m || m.phase !== 'aim' || !m.world.isAtRest() || this.ui.modalOpen) return
+    if (!guide.skip()) return
+    this.tutorialStageSignature = ''
+    this.tutorialProgressChanged()
+    if (guide.complete) this.finishTutorial()
+    else if (guide.step >= 3) this.stageTutorialScenario()
+  }
+
+  private syncTutorialCoach(): void {
+    const guide = this.tutorialGuide
+    if (this.mode !== 'tutorial' || !guide || guide.complete) {
+      this.ui.setTutorialCoach(null)
+      return
+    }
+    const m = this.match
+    const snapshot = guide.snapshot()
+    const step = TUTORIAL_STEPS[snapshot.step]
+    const settled = !!m && m.phase === 'aim' && m.world.isAtRest() && !this.ui.modalOpen
+    let copy: string = step.copy
+    let status = ''
+    if (snapshot.step === 1) status = `Short pull ${snapshot.shortPullSeen ? '✓' : '○'} · longer pull ${snapshot.longPullSeen ? '✓' : '○'}. Compare the arrow and meter.`
+    if (snapshot.step === 2 && m?.phase === 'moving') status = 'Ball still moving · your next turn unlocks when every piece settles.'
+    if (snapshot.step === 3 && snapshot.boardPhase === 'bonus') {
+      copy = 'The rebound is in play. On this fresh attempt, guide that real rebound onto one of your caps to earn a bonus flick.'
+      status = 'Rebound lesson complete · now earn the bonus.'
+    }
+    if (snapshot.step === 4) {
+      copy = 'Flick the ball into a different friendly cap. Three real completed passes charge a power shot; the combo meter is now visible.'
+      status = `${snapshot.passes} of 3 passes · each drill resets only after the play settles.`
+    }
+    if (snapshot.step === 6) {
+      const next = snapshot.capTypes.includes('winger') ? 'striker' : 'winger'
+      const label = next === 'winger' ? 'Winger' : 'Striker'
+      copy = `Try the highlighted ${label.toLowerCase()} cap, then compare the other type. They have different weight and glide.`
+      status = `${snapshot.capTypes.length} of 2 cap types tried · this is optional.`
+    }
+    if (snapshot.step === 2 && m?.phase !== 'moving') status = 'Take a flick, then wait for the full play to settle.'
+    const view: TutorialCoachView = {
+      stepIndex: snapshot.step,
+      stepLabel: snapshot.step === 6 ? 'OPTIONAL · CAP COMPARISON' : `LESSON ${snapshot.step + 1} OF ${TUTORIAL_STEPS.length}`,
+      title: step.title,
+      copy,
+      status,
+      hint: step.hint,
+      hintAvailable: snapshot.attempts >= 2,
+      hintVisible: snapshot.hintVisible,
+      retryEnabled: settled,
+    }
+    this.ui.setTutorialCoach(view)
+  }
+
+  private tutorialCapId(type: string): number {
+    const m = this.match
+    if (!m) return 0
+    const found = m.world.caps.findIndex((_cap, id) => {
+      const info = m.world.capInfo(id)
+      return info.team === 0 && info.type.id === type
+    })
+    return found >= 0 ? found : 0
+  }
+
+  /** Reposition only between settled practice plays; every flick/rebound/pass stays physical. */
+  private stageTutorialScenario(): void {
+    const m = this.match
+    const guide = this.tutorialGuide
+    if (!m || !guide || guide.complete || m.phase !== 'aim' || !m.world.isAtRest() || this.ui.modalOpen) return
+    const state = guide.snapshot()
+    const signature = `${state.step}:${state.boardPhase}:${state.passes}:${state.attempts}:${state.capTypes.join(',')}`
+    if (signature === this.tutorialStageSignature) return
+
+    // Park both teams clear of the drill lane; no body moves during a live play.
+    for (let id = 0; id < m.world.caps.length; id++) {
+      const team = m.world.capInfo(id).team
+      const slot = m.world.capInfo(id).slot
+      m.world.place(m.world.caps[id], { x: 110 + slot * 195, y: team === 0 ? 470 : 540 })
+    }
+    this.tutorialTarget = null
+    this.tutorialPickCapId = null
+
+    if (state.step <= 2) {
+      const sourceId = this.tutorialCapId('striker')
+      const source = m.world.caps[sourceId]
+      const sourceRadius = m.world.capInfo(sourceId).type.radius
+      const sourceX = 280
+      const sourceY = 480
+      for (let id = 0; id < m.world.caps.length; id++) {
+        if (id === sourceId) continue
+        const info = m.world.capInfo(id)
+        m.world.place(m.world.caps[id], { x: 110 + info.slot * 195, y: info.team === 0 ? 560 : 80 })
+      }
+      m.world.place(source, { x: sourceX, y: sourceY })
+      m.world.place(m.world.ball, { x: sourceX + sourceRadius + BALL.radius + 4, y: sourceY })
+      this.tutorialTarget = { x: 1000, y: PITCH.height / 2 }
+      this.tutorialPickCapId = sourceId
+      m.possession = newPossession()
+    } else if (state.step === 3) {
+      const sourceId = this.tutorialCapId('striker')
+      const targetId = this.tutorialCapId('winger')
+      const source = m.world.caps[sourceId]
+      const sourceRadius = m.world.capInfo(sourceId).type.radius
+      const ballX = 739
+      const ballY = 75
+      m.world.place(source, { x: ballX - sourceRadius - BALL.radius - 3, y: ballY })
+      m.world.place(m.world.caps[targetId], { x: 872, y: 161 })
+      m.world.place(m.world.ball, { x: ballX, y: ballY })
+      // The marked winger lies on the return path, not the outbound path to the end board.
+      this.tutorialTarget = { x: 872, y: 161 }
+      this.tutorialPickCapId = sourceId
+      m.possession = newPossession()
+    } else if (state.step === 4 || state.step === 5 || state.step === 6) {
+      if (state.step === 4 && state.passes === 0) m.possession = newPossession()
+      if (state.step === 5) {
+        m.possession.chain[0] = m.ruleset.combos.passesForPowerShot
+        m.possession.powerReady[0] = true
+      }
+      const wantedType = state.step === 6
+        ? (state.capTypes.includes('winger') ? 'striker' : 'winger')
+        : state.step === 5 ? 'striker' : null
+      const previous = state.step === 4 && state.passes > 0 ? m.possession.lastCap : null
+      const sourceId = previous?.team === 0 ? previous.id : wantedType ? this.tutorialCapId(wantedType) : this.tutorialCapId('striker')
+      const sourceInfo = m.world.capInfo(sourceId)
+      const nextSlot = (sourceInfo.slot + 1) % 5
+      const targetId = nextSlot
+      const sourceX = state.step === 4 ? 175 + state.passes * 160 : 210
+      const sourceY = 310
+      const sourceRadius = sourceInfo.type.radius
+      const ballX = sourceX + sourceRadius + BALL.radius + 4
+      const targetX = state.step === 4 ? ballX + 118 : 910
+      const targetY = state.step === 4 ? sourceY : 310
+      m.world.place(m.world.caps[sourceId], { x: sourceX, y: sourceY })
+      if (state.step === 4) m.world.place(m.world.caps[targetId], { x: targetX, y: targetY })
+      m.world.place(m.world.ball, { x: ballX, y: sourceY })
+      this.tutorialTarget = state.step === 6 ? { x: sourceX, y: sourceY } : { x: targetX, y: targetY }
+      this.tutorialPickCapId = sourceId
+    }
+
+    this.tutorialStageSignature = signature
+    this.refreshMeters()
+    this.syncTutorialCoach()
+  }
+
+  private drawTutorialTarget(ctx: CanvasRenderingContext2D): void {
+    const p = this.tutorialTarget
+    if (!p || this.mode !== 'tutorial') return
+    ctx.save()
+    ctx.strokeStyle = '#ffd34f'
+    ctx.fillStyle = 'rgba(255, 211, 79, .12)'
+    ctx.lineWidth = 5
+    ctx.setLineDash([10, 7])
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, 34, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.font = '900 14px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillStyle = '#fff3c2'
+    ctx.fillText(this.tutorialGuide?.step === 6 ? 'TRY THIS CAP' : 'TARGET', p.x, p.y - 42)
+    ctx.restore()
   }
 
   private openOnline(): void {
@@ -400,6 +642,10 @@ export class App {
       m.events.on('contact', c => this.onContact(c)),
       m.events.on('flick', f => {
         this.matchStatistics.recordFlick(f.team, f.powerShot)
+        if (this.mode === 'tutorial' && this.tutorialGuide) {
+          if (this.tutorialGuide.onFlick(f.team, f.powerShot, m.world.capInfo(f.capId).type.id, f.power)) this.tutorialProgressChanged()
+          else this.syncTutorialCoach()
+        }
         this.audio.flick(f.power)
         if (Math.abs(f.spin) > 0.6 && f.power > 0.45 && Math.random() < 0.5) this.say('curler', {}, 1)
         if (f.powerShot) { this.ui.banner('POWER SHOT!', '#ff7a1f', 900); this.say('powerShot', {}, 2); this.shake.add(4) }
@@ -409,10 +655,20 @@ export class App {
       m.events.on('turn', t => { if (!opts.online) this.onTurn(t.team, t.reason) }),
       m.events.on('goal', g => { if (!opts.online) this.onGoal(g.scorer, g.end, g.ownGoal, g.score.goals, g.capId) }),
       m.events.on('win', w => { if (!opts.online) this.onWin(w.team, w.score.goals, w.reason) }),
-      m.events.on('phase', p => { if (p.phase !== 'aim') this.input.cancel(); this.refreshActionButton() }),
+      m.events.on('phase', p => { if (p.phase !== 'aim') this.input.cancel(); this.refreshActionButton(); if (this.mode === 'tutorial') this.syncTutorialCoach() }),
       m.events.on('whistle', w => this.onWhistle(w)),
       m.events.on('restart', r => this.onRestart(r)),
-      m.events.on('play', e => { this.matchStatistics.recordPlay(e); this.onPlayEvent(e) }),
+      m.events.on('play', e => {
+        this.matchStatistics.recordPlay(e)
+        if (this.mode === 'tutorial' && this.tutorialGuide && this.tutorialGuide.onPlay(e)) this.tutorialProgressChanged()
+        else if (this.mode === 'tutorial') this.syncTutorialCoach()
+        this.onPlayEvent(e)
+      }),
+      m.events.on('settled', () => {
+        if (this.mode !== 'tutorial' || !this.tutorialGuide) return
+        if (this.tutorialGuide.onSettled()) this.tutorialProgressChanged()
+        else this.syncTutorialCoach()
+      }),
       m.events.on('half', h => { this.audio.whistle(true); this.ui.banner(h.half === 2 ? 'HALF TIME' : `HALF ${h.half}`, '#151515', 1800, true); this.say('halftime', {}, 3) }),
       m.events.on('kick', k => this.onKick(k.team, k.scored, k.saved)),
       m.events.on('step', s => this.onStep(s.dtMs)),
@@ -527,6 +783,17 @@ export class App {
 
   private onTurn(team: TeamIndex, reason: TurnReason): void {
     const m = this.match
+    const callOut = this.lastOut
+    if (this.mode === 'tutorial' && this.tutorialGuide) {
+      if (this.tutorialGuide.complete) { this.finishTutorial(); return }
+      if (team !== 0 && m?.phase === 'aim') {
+        m.turns.startTurn(0, 'normal')
+        this.onTurn(0, 'normal')
+        return
+      }
+      if (team === 0) this.stageTutorialScenario()
+      this.syncTutorialCoach()
+    }
     if (reason === 'normal' || reason === 'bonus' || reason === 'kickoff' || reason === 'halftime') this.restartZone = null
     this.ui.setTurn(team, this.teams, TURN_LABEL[reason])
     const color = this.teams[team].primary
@@ -557,6 +824,9 @@ export class App {
     if (reason === 'penalty' && m?.ruleset.hiddenPenalties && (this.mode === 'quick' || this.mode === 'tournament')) this.beginHiddenPenalty(team)
     if (this.mode === 'ai' && team === 1 && this.live) this.scheduleAi(m)
     else this.cancelAi()
+    const shootout = reason === 'keeper' && !!m?.shootout
+    this.showFirstRuleHint(shootout ? 'penalty' : reason, shootout ? m!.shootout!.kicker : team, callOut, shootout)
+    this.lastRuleWhistle = null
   }
 
   private beginHiddenPenalty(kicker: TeamIndex): void {
@@ -732,6 +1002,7 @@ export class App {
   private onWhistle(w: Whistle | { kind: 'dropball' }): void {
     this.audio.whistle()
     if (w.kind === 'dropball') { this.ui.banner('DEAD BALL', '#f5d000', 1200); return }
+    this.lastRuleWhistle = w
     this.crowd.ooh()
     this.ui.banner(w.kind === 'foul' ? 'FOUL!' : 'OFFSIDE!', '#f5d000', 1200)
     this.say(w.kind === 'foul' ? 'foul' : 'offside', {}, 3)
@@ -744,6 +1015,59 @@ export class App {
       goalkick: r.retake ? 'Goal-kick retake' : 'Goal kick', dropball: 'Dropped ball',
     }
     this.ui.restartBanner(`${labels[r.kind]} · ${this.teams[r.team].name}`, this.teams[r.team].primary)
+  }
+
+  private showFirstRuleHint(reason: TurnReason, team: TeamIndex, out: Vec | null, shootout = false): void {
+    if (this.mode === 'tutorial' || !this.live) return
+    const key: RuleHintKey | null = shootout ? 'shootout' : reason === 'goalkick' ? 'goalKick'
+      : reason === 'corner' ? 'corner'
+        : reason === 'penalty' ? 'penalty'
+          : reason === 'offside' ? 'offside'
+            : reason === 'freekick' ? (this.lastRuleWhistle?.kind === 'offside' ? 'offside' : 'foul') : null
+    if (!key || this.settings.ruleHintsSeen[key]) return
+    const other = this.teams[team === 0 ? 1 : 0].name
+    const awarded = this.teams[team].name
+    const lastTouch = this.match?.ruleset.outBy === 'lastTouch' ? 'touched it last' : 'flicked it'
+    let why = `${other} gave away this restart.`
+    let restriction = 'Follow the marked restart area and keep the play legal.'
+    if (shootout) {
+      why = 'This match is level, so the teams are taking alternating penalty kicks to decide it.'
+      restriction = 'The keeper sets on the line; the kicker gets one flick from the spot.'
+    } else if (key === 'goalKick') {
+      why = `${other} ${lastTouch} before the ball crossed ${awarded}'s end line.`
+      restriction = 'The keeper stands behind the ball. Opponents must stay outside the penalty area until the ball clears it.'
+    } else if (key === 'corner') {
+      why = `${other} ${lastTouch} before the ball crossed their own end line${out ? ` near the ${out.y < PITCH.height / 2 ? 'upper' : 'lower'} corner` : ''}.`
+      restriction = `Defenders retreat at least ${Math.round(this.match?.ruleset.wallDistance ?? 0)} px from the corner ball.`
+    } else if (key === 'foul') {
+      const culprit = this.lastRuleWhistle?.kind === 'foul' ? this.teams[this.lastRuleWhistle.offender].name : other
+      why = `${culprit} flicked a cap into an opponent before touching the ball.`
+      restriction = `The other side restarts here; opponents stay ${Math.round(this.match?.ruleset.wallDistance ?? 0)} px away.`
+    } else if (key === 'offside') {
+      why = 'A forward was in an illegal position when their teammate played the ball.'
+      restriction = 'The defending side restarts from the offside spot; the restart is indirect.'
+    } else if (key === 'penalty') {
+      const culprit = this.lastRuleWhistle?.kind === 'foul' ? this.teams[this.lastRuleWhistle.offender].name : other
+      why = `${culprit} committed a foul inside the defending penalty area.`
+      restriction = 'The taker gets one flick from the spot. The keeper follows the keeper-line rule shown for this match.'
+    }
+    this.pendingRuleHint = key
+    this.ui.showRuleHint(makeRuleHint(key, awarded, other, why, restriction))
+  }
+
+  private closeRuleHint(): void {
+    const key = this.pendingRuleHint
+    this.pendingRuleHint = null
+    if (key) {
+      this.settings.ruleHintsSeen[key] = true
+      saveSettings(this.settings)
+    }
+    if (this.hiddenPenalty && (this.hiddenPenalty.stage === 'cover-keeper' || this.hiddenPenalty.stage === 'cover-shooter')) {
+      this.showPenaltyCover()
+      return
+    }
+    this.ui.modal(null)
+    this.syncTutorialCoach()
   }
 
   private onPlayEvent(e: TrackerEvent): void {
@@ -846,7 +1170,7 @@ export class App {
     }
     const stats = this.matchStatistics.snapshot()
     const modeLabels: Record<Mode, string> = {
-      quick: 'Quick Match', ai: 'Street match vs AI', shootout: 'Penalty Shootout', tournament: 'Street Tournament', online: 'Online Match',
+      quick: 'Quick Match', ai: 'Street match vs AI', shootout: 'Penalty Shootout', tournament: 'Street Tournament', online: 'Online Match', tutorial: 'Guided tutorial',
     }
     this.summaryActions = actions
     this.matchSummary = {
@@ -1047,7 +1371,7 @@ export class App {
     if (this.mode === 'online' && (!this.onlineState?.ready || this.onlineClient?.state !== 'open' || this.onlineTeam !== m.team)) return []
     return m.world.caps
       .map((b, id) => ({ b, id, info: m.world.capInfo(id) }))
-      .filter(c => m.canPick(c.id))
+      .filter(c => m.canPick(c.id) && (this.mode !== 'tutorial' || (c.info.team === 0 && (this.tutorialPickCapId === null || c.id === this.tutorialPickCapId))))
       .map(c => ({ id: c.id, x: c.b.position.x, y: c.b.position.y, r: c.info.type.radius }))
   }
 
@@ -1073,9 +1397,32 @@ export class App {
         this.tournament = null
         this.currentTie = null
         this.pendingTie = null
-        if (this.mode === 'online') this.openOnline()
+        this.tutorialGuide = null
+        this.tutorialStageSignature = ''
+        this.ui.setTutorialCoach(null)
+        if (this.mode === 'quick' && !this.settings.tutorialPrompted) this.ui.showTutorialPrompt()
+        else if (this.mode === 'online') this.openOnline()
         else this.openSetup()
         break
+      case 'tutorial':
+        if (arg === 'entry') this.startTutorial(this.settings.tutorialStep >= TUTORIAL_COMPLETE_STEP)
+        else if (arg === 'learn') this.startTutorial(false)
+        else if (arg === 'skip-prompt') this.skipTutorialPrompt()
+        else if (arg === 'skip') this.skipTutorialDrill()
+        else if (arg === 'retry') this.retryTutorialDrill()
+        else if (arg === 'hint') { this.tutorialGuide?.revealHint(); this.syncTutorialCoach() }
+        else if (arg === 'pause') this.ui.modal('pause')
+        else if (arg === 'leave') this.leaveTutorial()
+        else if (arg === 'regular') {
+          this.tutorialGuide = null
+          this.mode = 'quick'
+          this.ui.modal(null)
+          this.toMenu()
+          this.openSetup()
+        } else if (arg === 'done-replay') { this.ui.modal(null); this.startTutorial(true) }
+        else if (arg === 'done-menu') { this.tutorialGuide = null; this.mode = 'quick'; this.toMenu() }
+        break
+      case 'rulehint': if (arg === 'close') this.closeRuleHint(); break
       case 'ai-level':
         if (arg === 'easy' || arg === 'medium' || arg === 'hard') this.settings.aiLevel = arg as AiLevel
         saveSettings(this.settings)
@@ -1143,9 +1490,15 @@ export class App {
       case 'keeper-lock': this.lockPenaltyKeeper(); break
       case 'shot-lock': this.lockPenaltyShot(); break
       case 'penalty-concede': this.forfeitPenalty(); break
-      case 'pause': if (this.match && this.match.phase !== 'over') this.ui.modal('pause'); break
-      case 'resume': this.ui.modal(null); break
-      case 'concede-match': this.confirmAction = 'concede'; this.ui.$('[data-confirm-title]').textContent = 'Concede the match?'; this.ui.$('[data-confirm-text]').textContent = 'The other player will be awarded the win.'; this.ui.modal('confirm'); break
+      case 'pause': if (this.match && this.match.phase !== 'over') { this.ui.modal('pause'); this.syncTutorialCoach() }; break
+      case 'resume': this.ui.modal(null); this.syncTutorialCoach(); break
+      case 'concede-match':
+        if (this.mode === 'tutorial') break
+        this.confirmAction = 'concede'
+        this.ui.$('[data-confirm-title]').textContent = 'Concede the match?'
+        this.ui.$('[data-confirm-text]').textContent = 'The other player will be awarded the win.'
+        this.ui.modal('confirm')
+        break
       case 'skipreplay': this.endReplay(); break
       case 'replay-last-goal': this.playLastGoalReplay(); break
       case 'online-copy': void this.copyOnlineInvite(); break
@@ -1156,6 +1509,12 @@ export class App {
       case 'restart':
         if (!this.match) return
         if (this.mode === 'online') { this.ui.caption('Leave this room to start a new match.', 2500); break }
+        if (this.mode === 'tutorial' && this.tutorialGuide) {
+          if (this.match.phase !== 'aim' || !this.match.world.isAtRest()) { this.ui.caption('Let every piece settle before retrying this drill.', 2200); break }
+          this.ui.modal(null)
+          this.retryTutorialDrill()
+          break
+        }
         this.ui.modal(null)
         this.matchStatistics.reset()
         this.lastGoalReplay = null
@@ -1178,7 +1537,7 @@ export class App {
         this.refreshMeters()
         this.audio.whistle()
         break
-      case 'newmatch': this.toMenu(); break
+      case 'newmatch': if (this.mode === 'tutorial') this.leaveTutorial(); else this.toMenu(); break
       case 'online':
         if (arg === 'create') void this.connectOnline('')
         else if (arg === 'join') {
@@ -1234,7 +1593,7 @@ export class App {
     if (this.mode === 'quick') this.startMatch(rules, this.surface)
     else if (this.mode === 'ai') this.startMatch(rules, this.surface, { vsAi: true })
     else if (this.mode === 'shootout') this.startMatch(rules, this.surface, { shootout: true })
-    else {
+    else if (this.mode === 'tournament') {
       this.tournament = new Tournament([this.settings.teams[0], this.settings.teams[1], ...RIVAL_CREWS])
       this.renderBracket()
     }

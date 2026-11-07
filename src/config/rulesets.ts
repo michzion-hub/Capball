@@ -86,6 +86,29 @@ export const RULESETS = {
   arcade: { ...base, id: 'arcade', name: 'Loose Arcade', blurb: 'No whistles at all. Two passes charge a monster power shot.', goalsToWin: 3, combos: { enabled: true, passesForPowerShot: 2, powerMultiplier: 1.9 } },
 } satisfies Record<string, Ruleset>
 
+/** Solo coaching match: real flick physics, boards, cap types and combos, without match-ending or restart whistles. */
+export const TUTORIAL_RULESET: Ruleset = {
+  ...RULESETS.street,
+  id: 'tutorial',
+  name: 'Guided Practice',
+  blurb: 'A solo practice pitch for learning the real flick, board and pass mechanics.',
+  goalsToWin: null,
+  halves: null,
+  corners: false,
+  freeKicks: false,
+  penalties: false,
+  offside: false,
+  boardBonus: true,
+  combos: { ...RULESETS.street.combos, enabled: true, passesForPowerShot: 3 },
+  spin: false,
+  deadBallTurns: 0,
+  goalKickRestriction: false,
+  advantage: false,
+  keeperBox: false,
+  hiddenPenalties: false,
+  keeperMayLeaveLine: false,
+}
+
 export type RulesetId = keyof typeof RULESETS
 export const RULESET_ORDER: RulesetId[] = ['street', 'proper', 'arcade', 'basic']
 

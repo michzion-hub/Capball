@@ -508,3 +508,46 @@ button { font: inherit; color: inherit; cursor: pointer; border: 0; background: 
   .sheet .summary-replay { min-height: 44px; margin: 0; }
   .match-summary .win-actions .btn { min-height: 44px; margin-top: 0; }
 }
+
+
+/* ---------- guided first-match tutorial and referee cards ---------- */
+.tutorial-coach {
+  position: fixed; z-index: 28; top: calc(92px + var(--safe-t)); left: 50%; transform: translateX(-50%);
+  width: min(520px, calc(100vw - 28px - var(--safe-l) - var(--safe-r))); max-height: min(34dvh, 250px); overflow-y: auto;
+  padding: 10px 14px; background: var(--paper); color: var(--ink); border: 2px solid var(--ink); pointer-events: none;
+  box-shadow: 5px 5px 0 rgba(0,0,0,.5); rotate: -.35deg; touch-action: pan-y;
+}
+.tutorial-coach[hidden] { display: none !important; }
+.tutorial-coach .tutorial-actions { pointer-events: auto; }
+.tutorial-coach-head { display: flex; align-items: baseline; gap: 9px; }
+.tutorial-step { flex: none; font: 14px var(--hand); font-weight: 700; color: #8b160f; text-transform: uppercase; }
+.tutorial-coach h2 { margin: 0; font: 23px/1.05 var(--display); letter-spacing: .03em; }
+.tutorial-coach p { margin: 6px 0; font-size: 16px; line-height: 1.35; }
+.tutorial-coach .tutorial-status { color: #7b180f; font-weight: 700; }
+.tutorial-coach .tutorial-hint { padding: 6px 8px; background: #fff1c8; border-left: 4px solid var(--cap); }
+.tutorial-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+.tutorial-actions .chip { min-height: 44px; padding: 6px 10px; font-size: 14px; }
+.tutorial-actions .chip:disabled { opacity: .52; cursor: not-allowed; }
+.tutorial-sheet { max-width: 520px; }
+.tutorial-sheet p { font-size: 17px; line-height: 1.45; }
+.referee-sheet { max-width: 500px; border-top: 8px solid var(--cap); }
+.referee-sheet .kicker { color: #8b160f; font: 15px var(--hand); font-weight: 700; text-transform: uppercase; }
+.referee-details { display: grid; gap: 9px; margin: 14px 0; }
+.referee-details > div { display: grid; grid-template-columns: 92px 1fr; gap: 10px; align-items: start; border-top: 1px solid rgba(23,23,20,.2); padding-top: 8px; }
+.referee-details dt { font: 16px var(--hand); font-weight: 700; }
+.referee-details dd { margin: 0; font-size: 16px; line-height: 1.4; }
+[data-tutorial-leave][hidden], [data-pause-newmatch][hidden] { display: none !important; }
+@media (max-width: 640px) {
+  .tutorial-coach { top: calc(108px + var(--safe-t)); width: calc(100vw - 20px - var(--safe-l) - var(--safe-r)); padding: 8px 10px; max-height: min(38dvh, 240px); }
+  .tutorial-coach h2 { font-size: 21px; }
+  .tutorial-coach p { font-size: 15px; margin: 4px 0; }
+  .tutorial-actions { gap: 5px; }
+  .tutorial-actions .chip { flex: 1 1 auto; min-width: 42%; font-size: 13px; }
+  .referee-details > div { grid-template-columns: 76px 1fr; gap: 8px; }
+}
+@media (max-height: 520px) {
+  .tutorial-coach { top: calc(68px + var(--safe-t)); max-height: min(42dvh, 190px); padding: 7px 10px; }
+  .tutorial-coach p { font-size: 15px; line-height: 1.25; margin: 3px 0; }
+  .tutorial-coach h2 { font-size: 20px; }
+  .tutorial-actions .chip { min-height: 44px; }
+}

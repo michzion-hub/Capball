@@ -1,5 +1,6 @@
 import type { TeamIndex } from '../physics/world'
 import type { TeamDesign } from '../render/capArt'
+import type { RuleHintContent } from '../game/ruleHints'
 
 export type Action = string
 
@@ -22,6 +23,18 @@ export interface MatchSummaryView {
   color: string
   stats: SummaryStatRow[]
   replayAvailable: boolean
+}
+
+export interface TutorialCoachView {
+  stepIndex: number
+  stepLabel: string
+  title: string
+  copy: string
+  status: string
+  hint: string
+  hintAvailable: boolean
+  hintVisible: boolean
+  retryEnabled: boolean
 }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -52,11 +65,14 @@ export class UI {
       if (el) this.handlers.action(`input:${el.dataset.input}`, el)
     }, { signal: this.abort.signal })
     root.addEventListener('keydown', e => {
-      const dialog = this.root.querySelector<HTMLElement>('[data-modal="settings"].is-active, [data-modal="winner"].is-active')
+      const dialog = this.root.querySelector<HTMLElement>('.modal[aria-modal="true"].is-active')
       if (!dialog) return
       if (e.key === 'Escape') {
         e.preventDefault()
         if (dialog.dataset.modal === 'settings') this.modal(null)
+        else if (dialog.dataset.modal === 'rule-hint') this.handlers.action('rulehint:close', dialog.querySelector<HTMLElement>('[data-action="rulehint:close"]')!)
+        else if (dialog.dataset.modal === 'tutorial-prompt') this.handlers.action('tutorial:skip-prompt', dialog.querySelector<HTMLElement>('[data-action="tutorial:skip-prompt"]')!)
+        else if (dialog.dataset.modal === 'tutorial-done') this.handlers.action('tutorial:done-menu', dialog.querySelector<HTMLElement>('[data-action="tutorial:done-menu"]')!)
         return
       }
       if (e.key !== 'Tab') return
@@ -224,6 +240,58 @@ export class UI {
     this.modal('penalty-reveal')
   }
 
+  setTutorialCoach(view: TutorialCoachView | null): void {
+    const panel = this.$('[data-tutorial-coach]')
+    const wasHidden = panel.hidden
+    panel.hidden = view === null
+    this.root.classList.toggle('tutorial-active', view !== null)
+    this.root.classList.toggle('tutorial-hide-combo', view !== null && view.stepIndex < 4)
+    this.setTutorialPauseMode(view !== null)
+    if (!view) return
+    panel.querySelector<HTMLElement>('[data-tutorial-step]')!.textContent = view.stepLabel
+    panel.querySelector<HTMLElement>('[data-tutorial-title]')!.textContent = view.title
+    panel.querySelector<HTMLElement>('[data-tutorial-copy]')!.textContent = view.copy
+    const status = panel.querySelector<HTMLElement>('[data-tutorial-status]')!
+    status.textContent = view.status
+    status.hidden = !view.status
+    const hint = panel.querySelector<HTMLElement>('[data-tutorial-hint]')!
+    hint.textContent = view.hint
+    hint.hidden = !view.hintVisible
+    panel.querySelector<HTMLButtonElement>('[data-action="tutorial:hint"]')!.hidden = !view.hintAvailable
+    panel.querySelector<HTMLButtonElement>('[data-action="tutorial:retry"]')!.disabled = !view.retryEnabled
+    panel.querySelector<HTMLButtonElement>('[data-action="tutorial:skip"]')!.disabled = !view.retryEnabled
+    if (wasHidden && this.root.dataset.current === 'hud') panel.querySelector<HTMLElement>('[data-tutorial-title]')!.focus()
+  }
+
+  setTutorialPauseMode(enabled: boolean): void {
+    this.$('[data-tutorial-leave]').hidden = !enabled
+    this.$('[data-pause-newmatch]').hidden = enabled
+    this.$('[data-pause-concede]').hidden = enabled
+    const restart = this.$('[data-pause-restart]')
+    restart.textContent = enabled ? 'Retry drill' : 'Restart'
+  }
+
+  showRuleHint(view: RuleHintContent): void {
+    const modal = this.$('[data-modal="rule-hint"]')
+    modal.dataset.ruleHintKey = view.key
+    modal.querySelector<HTMLElement>('[data-rule-hint-title]')!.textContent = view.label
+    modal.querySelector<HTMLElement>('[data-rule-hint-why]')!.textContent = view.why
+    modal.querySelector<HTMLElement>('[data-rule-hint-restart]')!.textContent = view.restart
+    modal.querySelector<HTMLElement>('[data-rule-hint-restriction]')!.textContent = view.restriction
+    this.modal('rule-hint')
+    modal.querySelector<HTMLButtonElement>('[data-action="rulehint:close"]')!.focus()
+  }
+
+  showTutorialPrompt(): void {
+    this.modal('tutorial-prompt')
+    this.$('[data-action="tutorial:learn"]').focus()
+  }
+
+  showTutorialComplete(): void {
+    this.modal('tutorial-done')
+    this.$('[data-action="tutorial:regular"]').focus()
+  }
+
   showMatchSummary(view: MatchSummaryView, actions: string): void {
     const modal = this.$('[data-modal="winner"]')
     modal.style.setProperty('--team', view.color)
@@ -314,6 +382,19 @@ const TEMPLATE = /* html */ `
   <button class="replay-tag" data-replay data-action="skipreplay" hidden>REPLAY <small>tap to skip</small></button>
 </section>
 
+<aside class="tutorial-coach" data-tutorial-coach hidden aria-label="CAPBALL tutorial" aria-live="polite">
+  <div class="tutorial-coach-head"><span class="tutorial-step" data-tutorial-step></span><h2 tabindex="-1" data-tutorial-title></h2></div>
+  <p data-tutorial-copy></p>
+  <p class="tutorial-status" data-tutorial-status hidden role="status"></p>
+  <p class="tutorial-hint" data-tutorial-hint hidden></p>
+  <div class="tutorial-actions">
+    <button class="chip" data-action="tutorial:hint" hidden>Need a hint?</button>
+    <button class="chip" data-action="tutorial:retry" disabled>Retry drill</button>
+    <button class="chip" data-action="tutorial:skip" disabled>Skip drill</button>
+    <button class="chip" data-action="tutorial:pause">Pause</button>
+  </div>
+</aside>
+
 <div class="banner" data-banner></div>
 <div class="caption" data-caption></div>
 <div class="restart-banner" data-restart-banner aria-live="polite"></div>
@@ -324,7 +405,48 @@ const TEMPLATE = /* html */ `
     <div class="tape tape-b"></div>
     <h2>How to play</h2>
     <div class="rules-body" data-rules-body></div>
-    <button class="btn" data-action="closemodal">Got it</button>
+  <button class="btn" data-action="closemodal">Got it</button>
+  </div>
+</div>
+
+<div class="modal" data-modal="tutorial-prompt" role="dialog" aria-modal="true" aria-labelledby="tutorial-prompt-title" aria-hidden="true">
+  <div class="sheet tutorial-sheet">
+    <div class="tape tape-b"></div>
+    <span class="kicker">First match?</span>
+    <h2 id="tutorial-prompt-title">Learn the feel</h2>
+    <p>A short, optional solo practice teaches flicking, rebounds and pass chains. It uses real CAPBALL physics; you can leave whenever you like.</p>
+    <div class="win-actions">
+      <button class="btn" data-action="tutorial:learn">Learn the basics</button>
+      <button class="btn ghost" data-action="tutorial:skip-prompt">Skip and play</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" data-modal="tutorial-done" role="dialog" aria-modal="true" aria-labelledby="tutorial-done-title" aria-hidden="true">
+  <div class="sheet tutorial-sheet">
+    <div class="tape tape-b"></div>
+    <span class="kicker">Practice complete</span>
+    <h2 id="tutorial-done-title">Now take it to the street</h2>
+    <p>You’ve felt the flick, the boards, the pass chain and the different caps. Your normal matches still use the full rules.</p>
+    <div class="win-actions">
+      <button class="btn" data-action="tutorial:regular">Start Quick Match</button>
+      <button class="btn ghost" data-action="tutorial:done-replay">Replay tutorial</button>
+      <button class="chip" data-action="tutorial:done-menu">Back to menu</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" data-modal="rule-hint" role="dialog" aria-modal="true" aria-labelledby="rule-hint-title" aria-hidden="true">
+  <div class="sheet referee-sheet">
+    <div class="tape tape-b"></div>
+    <span class="kicker">Referee’s call</span>
+    <h2 id="rule-hint-title" data-rule-hint-title></h2>
+    <dl class="referee-details">
+      <div><dt>Why</dt><dd data-rule-hint-why></dd></div>
+      <div><dt>Restart</dt><dd data-rule-hint-restart></dd></div>
+      <div><dt>Remember</dt><dd data-rule-hint-restriction></dd></div>
+    </dl>
+    <button class="btn" data-action="rulehint:close">Got it</button>
   </div>
 </div>
 
@@ -411,9 +533,10 @@ const TEMPLATE = /* html */ `
     <h2>Take a breather</h2>
     <div class="win-actions">
       <button class="btn" data-action="resume">Resume</button>
-      <button class="btn ghost" data-action="restart">Restart</button>
-      <button class="btn ghost" data-action="concede-match">Concede</button>
-      <button class="chip" data-action="newmatch">New match</button>
+      <button class="btn ghost" data-action="restart" data-pause-restart>Restart</button>
+      <button class="btn ghost" data-action="concede-match" data-pause-concede>Concede</button>
+      <button class="btn ghost" data-action="tutorial:leave" data-tutorial-leave hidden>Save &amp; leave tutorial</button>
+      <button class="chip" data-action="newmatch" data-pause-newmatch>New match</button>
     </div>
   </div>
 </div>

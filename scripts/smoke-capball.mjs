@@ -62,9 +62,79 @@ const waitForFunction = (page, pred, ms = 15000) => page.waitForFunction(pred, n
 async function startMode(page, action, tap = false) {
   const press = sel => (tap ? page.tap(sel) : page.click(sel))
   await press(`[data-action="${action}"]`)
+  if (action === 'mode:quick' && await page.$('[data-modal="tutorial-prompt"].is-active')) await press('[data-action="tutorial:skip-prompt"]')
   if (await page.$('[data-screen="setup"].is-active')) await press('[data-screen="setup"] [data-action="go"]')
   await page.waitForSelector('[data-screen="hud"].is-active')
+  await autoDismissRuleHints(page)
   await page.waitForTimeout(250)
+}
+
+async function autoDismissRuleHints(page) {
+  await page.evaluate(() => {
+    const modal = document.querySelector('[data-modal="rule-hint"]')
+    if (!modal || modal.dataset.smokeDismissInstalled) return
+    modal.dataset.smokeDismissInstalled = 'true'
+    const dismiss = () => {
+      if (!modal.classList.contains('is-active')) return
+      modal.querySelector('[data-action="rulehint:close"]')?.click()
+    }
+    const observer = new MutationObserver(dismiss)
+    observer.observe(modal, { attributes: true, attributeFilter: ['class'] })
+    window.__ruleHintSmokeObserver = observer
+  })
+}
+
+async function firstRunTutorial(page) {
+  await page.click('[data-action="mode:quick"]')
+  await page.waitForSelector('[data-modal="tutorial-prompt"].is-active')
+  await page.screenshot({ path: `${out}/11-tutorial-prompt.png` })
+  await page.click('[data-action="tutorial:learn"]')
+  await page.waitForSelector('[data-screen="hud"].is-active')
+  await page.waitForSelector('[data-tutorial-coach]:not([hidden])')
+  await page.evaluate(() => {
+    window.__tutorialFlickPowers = []
+    window.__capball.match.events.on('flick', event => window.__tutorialFlickPowers.push(event.power))
+  })
+  const flickWith = async (dx, dy = 0) => {
+    const before = await page.evaluate(() => window.__tutorialFlickPowers.length)
+    const id = await page.evaluate(() => window.__capball.pickable()[0]?.id ?? 4)
+    await mouseFlick(page, id, dx, dy)
+    await page.waitForFunction(n => window.__tutorialFlickPowers.length > n, before, { timeout: 5000, polling: 50 })
+    return page.evaluate(() => window.__tutorialFlickPowers.at(-1))
+  }
+  await flickWith(-52)
+  await page.waitForFunction(() => window.__capball.mode === 'tutorial' && window.__capball.match.phase === 'aim' && window.__capball.match.team === 0 && window.__capball.tutorialGuide.step === 1, null, { timeout: 20000, polling: 50 })
+  const shortPower = await flickWith(-48)
+  await page.waitForFunction(() => window.__capball.mode === 'tutorial' && window.__capball.match.phase === 'aim' && window.__capball.match.team === 0, null, { timeout: 20000, polling: 50 })
+  if (shortPower >= 0.4) throw new Error(`tutorial short pull was not short: power=${shortPower}`)
+  if (await page.evaluate(() => window.__capball.tutorialGuide.snapshot().shortPullSeen) !== true) throw new Error('tutorial did not record the real short pull')
+  const longPower = await flickWith(-132)
+  await page.waitForFunction(() => window.__capball.mode === 'tutorial' && window.__capball.match.phase === 'aim' && window.__capball.match.team === 0 && window.__capball.tutorialGuide.step === 2, null, { timeout: 20000, polling: 50 })
+  if (longPower < 0.4) throw new Error(`tutorial long pull was not powerful enough to advance: power=${longPower}`)
+  await page.screenshot({ path: `${out}/11-tutorial-settle.png` })
+  await flickWith(-78, 12)
+  await page.waitForFunction(() => window.__capball.mode === 'tutorial' && window.__capball.match.phase === 'aim' && window.__capball.match.team === 0 && window.__capball.tutorialGuide.step === 3, null, { timeout: 20000, polling: 50 })
+  await page.click('[data-action="tutorial:pause"]')
+  await page.waitForSelector('[data-modal="pause"].is-active')
+  await page.click('[data-action="tutorial:leave"]')
+  await page.waitForSelector('[data-screen="start"].is-active')
+  if (await page.evaluate(() => window.__capball.settings.tutorialStep) !== 3) throw new Error('tutorial lesson progress was not saved on leave')
+  await page.reload()
+  await page.waitForSelector('[data-screen="start"].is-active')
+  await page.locator('.start-more summary').click()
+  if (!(await page.locator('[data-action="tutorial:entry"]').innerText()).includes('Resume tutorial')) throw new Error('saved tutorial did not offer resume after reload')
+  await page.click('[data-action="tutorial:entry"]')
+  await page.waitForFunction(() => window.__capball.mode === 'tutorial' && window.__capball.tutorialGuide.step === 3 && window.__capball.match.phase === 'aim')
+  for (const step of [4, 5, 6, 7]) {
+    await page.click('[data-action="tutorial:skip"]')
+    await page.waitForFunction(n => window.__capball.tutorialGuide.step === n, step)
+  }
+  await page.waitForSelector('[data-modal="tutorial-done"].is-active')
+  await page.screenshot({ path: `${out}/11-tutorial-complete.png` })
+  await page.click('[data-action="tutorial:regular"]')
+  await page.waitForSelector('[data-screen="setup"].is-active')
+  await page.click('[data-screen="setup"] [data-action="go"]')
+  await page.waitForSelector('[data-screen="hud"].is-active')
 }
 async function mouseFlick(page, id, dx, dy) {
   const c = await capScreen(page, id)
@@ -149,7 +219,17 @@ try {
   await page.keyboard.press('Escape')
   if (!(await page.locator('[data-modal="settings"]').evaluate(el => !el.classList.contains('is-active')))) throw new Error('Escape did not close the settings dialog')
   if (await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) !== 'Open settings') throw new Error('closing settings did not restore focus to the gear')
-  await startMode(page, 'mode:quick')
+  await firstRunTutorial(page)
+  await page.evaluate(() => window.__capball.match.events.emit('turn', { team: 0, reason: 'goalkick' }))
+  await page.waitForSelector('[data-modal="rule-hint"].is-active')
+  const ruleCard = await page.locator('[data-modal="rule-hint"]').innerText()
+  if (!ruleCard.includes('Goal kick') || !ruleCard.includes('penalty area') || !ruleCard.includes('keeper')) throw new Error(`goal-kick referee card is missing its restriction: ${ruleCard}`)
+  await page.waitForTimeout(280)
+  await page.screenshot({ path: `${out}/11-first-goalkick-hint.png` })
+  await page.click('[data-action="rulehint:close"]')
+  await page.evaluate(() => window.__capball.match.events.emit('turn', { team: 0, reason: 'goalkick' }))
+  if (await page.locator('[data-modal="rule-hint"]').evaluate(el => el.classList.contains('is-active'))) throw new Error('goal-kick hint was shown again after dismissal')
+  await autoDismissRuleHints(page)
   const counts0 = await page.evaluate(() => window.__capball.debugCounts())
   let s = await state(page)
   if (s.phase !== 'aim' || s.team !== 0) throw new Error(`bad kickoff state ${JSON.stringify(s)}`)
@@ -448,7 +528,11 @@ try {
 
   // ---------- Phase 3: tournament ----------
   await page.click('[data-modal="winner"] [data-action="newmatch"]')
-  await page.click('[data-action="mode:tournament"]')
+  await page.waitForSelector('[data-screen="start"].is-active')
+  await page.locator('[data-screen="start"] [data-action="mode:tournament"]').click()
+  await page.waitForTimeout(100)
+  const tournamentTransition = await page.evaluate(() => ({ current: window.__capball.ui.root.dataset.current, mode: window.__capball.mode, dialogs: [...document.querySelectorAll('[data-modal].is-active')].map(el => el.dataset.modal), start: document.querySelector('[data-screen="start"]').classList.contains('is-active'), setup: document.querySelector('[data-screen="setup"]').classList.contains('is-active') }))
+  if (!tournamentTransition.setup) throw new Error(`tournament button did not open setup: ${JSON.stringify(tournamentTransition)}`)
   await page.waitForSelector('[data-screen="setup"].is-active')
   await page.click('[data-screen="setup"] [data-action="go"]')
   await page.waitForSelector('[data-screen="bracket"].is-active')
@@ -479,6 +563,7 @@ try {
   const hiddenCtx = await browser.newContext({ viewport: { width: 900, height: 700 } })
   const hiddenPage = await open(hiddenCtx)
   await hiddenPage.click('[data-action="mode:quick"]')
+  if (await hiddenPage.$('[data-modal="tutorial-prompt"].is-active')) await hiddenPage.click('[data-action="tutorial:skip-prompt"]')
   await hiddenPage.waitForSelector('[data-screen="setup"].is-active')
   await hiddenPage.click('[data-input="flag:hiddenPenalties"]')
   await hiddenPage.waitForFunction(() => document.querySelector('input[data-input="flag:hiddenPenalties"]')?.checked)
@@ -491,6 +576,12 @@ try {
     if (!a.match.awardInputFoul({ x: 30, y: 310 })) throw new Error('penalty-rule test call rejected')
   })
   await hiddenPage.waitForFunction(() => window.__capball.hiddenPenalty?.stage === 'cover-keeper', null, { timeout: 10000 })
+  if (await hiddenPage.$('[data-modal="rule-hint"].is-active')) {
+    const ruleCard = await hiddenPage.locator('[data-modal="rule-hint"]').innerText()
+    if (!ruleCard.includes('Penalty')) throw new Error(`unexpected rule card before hidden penalty: ${ruleCard}`)
+    await hiddenPage.click('[data-modal="rule-hint"] [data-action="rulehint:close"]')
+  }
+  await hiddenPage.waitForSelector('[data-modal="penalty"].is-active')
   await hiddenPage.click('[data-modal="penalty"] [data-action="penalty-cover"]')
   const keeperId = await hiddenPage.evaluate(() => window.__capball.hiddenPenalty.keeperId)
   const keeperBefore = await hiddenPage.evaluate(id => window.__capball.match.world.caps[id].position.y, keeperId)
