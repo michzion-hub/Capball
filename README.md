@@ -45,6 +45,10 @@ Turn on **Hidden penalties** in Quick Match or Tournament setup for a local pass
 
 At full time, CAPBALL shows both custom team names, the final score and result, match mode, active match duration, and side-by-side counts for flicks, power shots, completed passes and board-bonus plays. A shootout is explicitly labelled as a penalty score. The summary keeps the correct next step for quick matches, tournament rounds and online rooms. If a goal clip remains in the bounded replay recorder, **Replay last goal** plays those captured poses without advancing the finished match or mutating its physics; the replay can finish naturally or be skipped to return to the scorecard. No replay action is shown when there is no recorded goal clip.
 
+### Live HUD and pause sheet
+
+During a match, the compact score header keeps both team names and colors, score, clock and active turn visible. Combo and bonus meters stay in the overlay, while the centre of the pitch remains clear for aiming and flicking. The only always-visible secondary control is **Pause**; it opens a thumb-friendly paper sheet with **Resume**, **Restart**, **New match** (or **Leave room** online), **Rules** and a plain **Sound On/Off** control. Tutorial games retain **Save & leave**. Online invite copying and developer-only tuning stay inside that sheet when their modes permit them, with **Concede** separated as a destructive choice. During a drag, the pull meter labels low, medium, high or max based on the existing flick input power; this is feedback only and does not change flick math.
+
 ### Friction
 
 Friction is applied **once**. Matter's own `frictionAir` and `friction` are 0, and `physics/world.ts` applies a single Coulomb-style sliding friction each fixed step (constant deceleration = `grip × surface.frictionScale`). Bodies slow down and stop crisply, with no long exponential creep. The same per-step hook adds the slope acceleration on The Hill. Nothing moves a fixed distance during play; positions are only written between plays (kickoffs and set pieces).

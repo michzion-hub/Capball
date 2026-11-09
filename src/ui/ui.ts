@@ -50,6 +50,10 @@ export class UI {
   private captionTimer = 0
   private restartTimer = 0
   private settingsReturnFocus: HTMLElement | null = null
+  private pauseReturnFocus: HTMLElement | null = null
+  private rulesReturnFocus: HTMLElement | null = null
+  private rulesReturnToPause = false
+  private onlinePauseMode = false
 
   constructor(root: HTMLElement, private readonly handlers: UIHandlers) {
     this.root = root
@@ -73,6 +77,8 @@ export class UI {
         else if (dialog.dataset.modal === 'rule-hint') this.handlers.action('rulehint:close', dialog.querySelector<HTMLElement>('[data-action="rulehint:close"]')!)
         else if (dialog.dataset.modal === 'tutorial-prompt') this.handlers.action('tutorial:skip-prompt', dialog.querySelector<HTMLElement>('[data-action="tutorial:skip-prompt"]')!)
         else if (dialog.dataset.modal === 'tutorial-done') this.handlers.action('tutorial:done-menu', dialog.querySelector<HTMLElement>('[data-action="tutorial:done-menu"]')!)
+        else if (dialog.dataset.modal === 'pause') this.handlers.action('resume', dialog.querySelector<HTMLElement>('[data-action="resume"]')!)
+        else if (dialog.dataset.modal === 'rules') this.modal(null)
         return
       }
       if (e.key !== 'Tab') return
@@ -109,6 +115,11 @@ export class UI {
   modal(name: string | null): void {
     const current = this.root.querySelector<HTMLElement>('.modal.is-active')
     if (name === 'settings' && !current) this.settingsReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (name === 'pause' && !current) this.pauseReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (name === 'rules') {
+      this.rulesReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      this.rulesReturnToPause = current?.dataset.modal === 'pause'
+    }
     for (const s of this.$$('[data-modal]')) {
       const active = s.dataset.modal === name
       s.classList.toggle('is-active', active)
@@ -117,10 +128,29 @@ export class UI {
     this.root.classList.toggle('has-modal', name !== null)
     if (name === 'settings') {
       this.$('[data-modal="settings"] [data-setting-switch]:not([disabled])').focus()
+    } else if (name === 'pause') {
+      this.$('[data-modal="pause"] [data-action="resume"]').focus()
+    } else if (name === 'rules') {
+      this.$('[data-modal="rules"] [data-action="closemodal"]').focus()
     } else if (name === null && current?.dataset.modal === 'settings') {
       const target = this.settingsReturnFocus
       this.settingsReturnFocus = null
       if (target?.isConnected) target.focus()
+    } else if (name === null && current?.dataset.modal === 'pause') {
+      const target = this.pauseReturnFocus
+      this.pauseReturnFocus = null
+      if (target?.isConnected) target.focus()
+    } else if (name === null && current?.dataset.modal === 'rules') {
+      const restorePause = this.rulesReturnToPause
+      const target = this.rulesReturnFocus
+      this.rulesReturnToPause = false
+      this.rulesReturnFocus = null
+      if (restorePause) {
+        const pauseReturnFocus = this.pauseReturnFocus
+        this.modal('pause')
+        this.pauseReturnFocus = pauseReturnFocus
+        this.$('[data-modal="pause"] [data-action="rules"]').focus()
+      } else if (target?.isConnected) target.focus()
     }
   }
 
@@ -159,6 +189,22 @@ export class UI {
     const c = this.$('[data-clock]')
     c.hidden = text === null
     if (text !== null) c.textContent = text
+  }
+
+  setAimPower(aim: { power: number; valid: boolean; capped: boolean } | null): void {
+    const panel = this.$('[data-aim-power]')
+    panel.hidden = aim === null
+    if (!aim) return
+    const power = Math.max(0, Math.min(1, Number.isFinite(aim.power) ? aim.power : 0))
+    const level = !aim.valid ? 'pull' : aim.capped || power >= 0.9 ? 'max' : power < 0.34 ? 'low' : power < 0.67 ? 'medium' : 'high'
+    const percent = Math.round(power * 100)
+    const labels: Record<string, string> = { pull: 'Pull back', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' }
+    panel.dataset.level = level
+    panel.querySelector<HTMLElement>('[data-aim-level]')!.textContent = labels[level]
+    const meter = panel.querySelector<HTMLElement>('[role="meter"]')!
+    meter.setAttribute('aria-valuenow', String(percent))
+    meter.setAttribute('aria-valuetext', `${labels[level]}, ${percent} percent`)
+    panel.querySelector<HTMLElement>('[data-aim-bar]')!.style.width = `${percent}%`
   }
 
   setSound(on: boolean): void {
@@ -265,10 +311,18 @@ export class UI {
 
   setTutorialPauseMode(enabled: boolean): void {
     this.$('[data-tutorial-leave]').hidden = !enabled
-    this.$('[data-pause-newmatch]').hidden = enabled
-    this.$('[data-pause-concede]').hidden = enabled
+    this.$('[data-pause-newmatch]').hidden = enabled || this.onlinePauseMode
+    this.$('[data-pause-concede]').hidden = enabled || this.onlinePauseMode
     const restart = this.$('[data-pause-restart]')
     restart.textContent = enabled ? 'Retry drill' : 'Restart'
+  }
+
+  setOnlinePauseMode(enabled: boolean): void {
+    this.onlinePauseMode = enabled
+    this.$('[data-local-restart]').hidden = enabled
+    this.$('[data-online-copy]').hidden = !enabled
+    this.$('[data-online-leave]').hidden = !enabled
+    this.setTutorialPauseMode(!this.$('[data-tutorial-leave]').hidden)
   }
 
   showRuleHint(view: RuleHintContent): void {
@@ -359,25 +413,24 @@ const TEMPLATE = /* html */ `
 <section class="screen screen-bracket" data-screen="bracket"><div class="bracket-wrap" data-bracket></div></section>
 
 <section class="screen screen-hud" data-screen="hud">
-  <header class="scorebar">
+  <header class="scorebar" aria-label="Match scoreboard">
     <div class="slip" data-team-slip="0"><span class="slip-cap"></span><span class="slip-name"></span><span class="slip-score">0</span></div>
     <div class="mid">
-      <div class="clock" data-clock hidden>0:00</div>
-      <div class="turn" data-turn><span class="turn-who"></span><span class="turn-what"></span></div>
+      <div class="clock" data-clock hidden aria-label="Match clock">0:00</div>
+      <div class="turn" data-turn role="status" aria-live="polite" aria-atomic="true"><span class="turn-who"></span><span class="turn-what"></span></div>
     </div>
     <div class="slip right" data-team-slip="1"><span class="slip-score">0</span><span class="slip-name"></span><span class="slip-cap"></span></div>
   </header>
   <div class="meters" data-meters></div>
-  <nav class="hud-tools">
-    <button class="tool" data-action="pause" title="Pause">Pause</button>
-    <button class="tool" data-action="restart" data-local-restart title="Restart this match">Restart</button>
-    <button class="tool" data-action="newmatch" title="Back to the menu">New match</button>
-    <button class="tool" data-action="online-copy" data-online-copy hidden>Invite link</button>
-    <button class="tool" data-action="online-leave" data-online-leave hidden>Leave room</button>
-    <button class="tool" data-action="rules" title="Rules">Rules</button>
-    <button class="tool" data-action="sound" title="Sound"><span class="lbl">Sound on</span></button>
-    <button class="tool tool-tune" data-action="tune" title="Tuning overlay (\`)" data-tune-btn hidden>Tune</button>
+  <nav class="hud-tools" aria-label="Match controls">
+    <button class="tool tool-pause" type="button" data-action="pause" aria-label="Open match pause menu" title="Pause match">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>Pause</span>
+    </button>
   </nav>
+  <aside class="aim-power" data-aim-power hidden aria-live="off">
+    <div class="aim-power-head"><span>Flick pull</span><strong data-aim-level>Pull back</strong></div>
+    <div class="aim-power-track" role="meter" aria-label="Flick pull power" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="Pull back, 0 percent"><span data-aim-bar></span></div>
+  </aside>
   <div class="powerbtn-slot" data-powerbtn></div>
   <button class="replay-tag" data-replay data-action="skipreplay" hidden>REPLAY <small>tap to skip</small></button>
 </section>
@@ -400,10 +453,10 @@ const TEMPLATE = /* html */ `
 <div class="restart-banner" data-restart-banner aria-live="polite"></div>
 <div class="penalty-timer" data-penalty-timer hidden aria-live="polite"></div>
 
-<div class="modal" data-modal="rules" role="dialog" aria-label="Rules">
+<div class="modal" data-modal="rules" role="dialog" aria-modal="true" aria-labelledby="rules-title" aria-hidden="true">
   <div class="sheet">
     <div class="tape tape-b"></div>
-    <h2>How to play</h2>
+    <h2 id="rules-title">How to play</h2>
     <div class="rules-body" data-rules-body></div>
   <button class="btn" data-action="closemodal">Got it</button>
   </div>
@@ -527,17 +580,23 @@ const TEMPLATE = /* html */ `
   </div>
 </div>
 
-<div class="modal" data-modal="pause" role="dialog" aria-modal="true" aria-label="Match paused">
-  <div class="sheet">
-    <span class="kicker">Match paused</span>
-    <h2>Take a breather</h2>
-    <div class="win-actions">
-      <button class="btn" data-action="resume">Resume</button>
-      <button class="btn ghost" data-action="restart" data-pause-restart>Restart</button>
-      <button class="btn ghost" data-action="concede-match" data-pause-concede>Concede</button>
-      <button class="btn ghost" data-action="tutorial:leave" data-tutorial-leave hidden>Save &amp; leave tutorial</button>
-      <button class="chip" data-action="newmatch" data-pause-newmatch>New match</button>
+<div class="modal pause-modal" data-modal="pause" role="dialog" aria-modal="true" aria-labelledby="pause-title" aria-hidden="true">
+  <div class="sheet pause-sheet">
+    <span class="pause-kicker">Match paused</span>
+    <h2 id="pause-title">Take a breather</h2>
+    <p class="pause-intro">The pitch is waiting. Resume when you’re ready, or open a match tool below.</p>
+    <button class="btn pause-resume" type="button" data-action="resume">Resume match</button>
+    <div class="pause-actions" aria-label="Match tools">
+      <button class="btn ghost" type="button" data-action="restart" data-pause-restart data-local-restart>Restart</button>
+      <button class="btn ghost" type="button" data-action="rules">Rules</button>
+      <button class="btn ghost pause-sound" type="button" data-action="sound" aria-pressed="true"><span class="lbl">Sound on</span></button>
+      <button class="btn ghost" type="button" data-action="newmatch" data-pause-newmatch title="Leave this match and return to the main menu">New match</button>
+      <button class="btn ghost" type="button" data-action="online-copy" data-online-copy hidden>Invite link</button>
+      <button class="btn ghost" type="button" data-action="online-leave" data-online-leave hidden>Leave room</button>
+      <button class="btn ghost tool-tune" type="button" data-action="tune" title="Developer tuning overlay" data-tune-btn hidden>Tuning tools</button>
+      <button class="btn ghost" type="button" data-action="tutorial:leave" data-tutorial-leave hidden>Save &amp; leave tutorial</button>
     </div>
+    <button class="btn ghost pause-concede" type="button" data-action="concede-match" data-pause-concede>Concede match</button>
   </div>
 </div>
 `

@@ -469,9 +469,7 @@ export class App {
       this.mode = 'online'
       this.onlineTeam = message.role === 'p1' ? 0 : 1
       this.startMatch(RULESETS.street, 'park', { online: true, teams: [defaultTeam(0), defaultTeam(1)] })
-      this.ui.$('[data-local-restart]').hidden = true
-      this.ui.$('[data-online-copy]').hidden = false
-      this.ui.$('[data-online-leave]').hidden = false
+      this.ui.setOnlinePauseMode(true)
       this.ui.caption(`Room ${message.room} · you're ${message.role === 'p1' ? 'Gutter Kings' : 'Rooftop Rats'}. Share the invite link.`, 6000)
       this.applyOnlineState(message.state)
       return
@@ -634,6 +632,8 @@ export class App {
     this.renderer.setSurface(surface)
     this.renderer.setDesigns(this.teams)
     this.ui.setTeams(this.teams)
+    this.ui.setOnlinePauseMode(!!opts.online)
+    this.ui.setTutorialPauseMode(this.mode === 'tutorial')
     this.ui.setScore([0, 0])
     this.ui.html('[data-rules-body]', rulesHtml(rules, surface, !!opts.shootout))
     this.particles.clear()
@@ -1381,9 +1381,11 @@ export class App {
       // Shootout keeper: dragging slides it along the goal line instead of aiming.
       if (a) m.slideKeeper(a.pointer.y)
       this.aim = null
+      this.ui.setAimPower(null)
       return
     }
     this.aim = a
+    this.ui.setAimPower(a)
   }
 
   // ---------------------------------------------------------------- UI actions
@@ -1634,9 +1636,7 @@ export class App {
     this.onlineState = null
     this.onlineTeam = null
     this.pendingOnlineActions.clear()
-    this.ui.$('[data-local-restart]').hidden = false
-    this.ui.$('[data-online-copy]').hidden = true
-    this.ui.$('[data-online-leave]').hidden = true
+    this.ui.setOnlinePauseMode(false)
     this.ui.modal(null)
     this.ui.html('[data-win-actions]', '<button class="btn" data-action="restart">Rematch</button><button class="btn ghost" data-action="newmatch">New match</button>')
     this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { live: false })

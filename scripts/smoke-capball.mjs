@@ -40,12 +40,22 @@ async function waitForRoomServer() {
 const errors = []
 async function open(context, href = url) {
   const page = await context.newPage()
-  page.on('console', m => m.type() === 'error' && errors.push(m.text()))
+  page.on('console', m => m.type() === 'error' && errors.push(`${m.text()} @ ${m.location().url}:${m.location().lineNumber}`))
   page.on('pageerror', e => errors.push(String(e)))
+  page.on('requestfailed', r => errors.push(`request failed ${r.url()} (${r.failure()?.errorText ?? 'unknown'})`))
   page.on('response', r => r.status() >= 400 && errors.push(`HTTP ${r.status()} ${r.url()}`))
   await page.goto(href)
   await page.waitForSelector('[data-screen="start"].is-active', { timeout: 30_000 })
   await page.waitForFunction(() => !document.getElementById('boot'))
+  await page.evaluate(async () => {
+    await Promise.all([
+      document.fonts.load('400 16px Bangers'),
+      document.fonts.load('400 16px "Permanent Marker"'),
+      document.fonts.load('400 16px ManusCC0'),
+      document.fonts.load('700 16px ManusCC0'),
+    ])
+    await document.fonts.ready
+  })
   return page
 }
 const state = page => page.evaluate(() => {
@@ -56,8 +66,15 @@ const capScreen = (page, id) => page.evaluate(i => {
   const a = window.__capball
   return a.renderer.view.toScreen(a.match.world.caps[i].position)
 }, id)
-const waitPhase = (page, pred, ms = 15000) => page.waitForFunction(pred, null, { timeout: ms, polling: 50 })
-const waitForFunction = (page, pred, ms = 15000) => page.waitForFunction(pred, null, { timeout: ms, polling: 50 })
+function diagnosticWait(page, pred, ms, kind) {
+  const caller = new Error().stack?.split('\n')[3]?.trim() ?? 'unknown caller'
+  const condition = String(pred).replace(/\s+/g, ' ').slice(0, 180)
+  return page.waitForFunction(pred, null, { timeout: ms, polling: 50 }).catch(error => {
+    throw new Error(`${kind} failed at ${caller} (${condition}): ${error.message}`)
+  })
+}
+const waitPhase = (page, pred, ms = 15000) => diagnosticWait(page, pred, ms, 'phase wait')
+const waitForFunction = (page, pred, ms = 15000) => diagnosticWait(page, pred, ms, 'browser condition')
 /** Start a mode from the start screen; confirms the setup sheet when one exists. */
 async function startMode(page, action, tap = false) {
   const press = sel => (tap ? page.tap(sel) : page.click(sel))
@@ -82,6 +99,61 @@ async function autoDismissRuleHints(page) {
     observer.observe(modal, { attributes: true, attributeFilter: ['class'] })
     window.__ruleHintSmokeObserver = observer
   })
+}
+
+async function clickPauseAction(page, action) {
+  const pause = page.locator('[data-modal="pause"].is-active')
+  if (!(await pause.count())) {
+    await page.click('.hud-tools [data-action="pause"]')
+    await page.waitForSelector('[data-modal="pause"].is-active')
+  }
+  const control = page.locator(`[data-modal="pause"].is-active [data-action="${action}"]`)
+  if (!(await control.isVisible())) throw new Error(`pause action is not visible: ${action}`)
+  await control.click()
+}
+
+async function assertHudPause(page, label) {
+  const viewport = page.viewportSize()
+  const hudActions = await page.locator('.hud-tools button').evaluateAll(els => els.filter(el => !el.hidden).map(el => el.textContent.trim()))
+  if (hudActions.length !== 1 || hudActions[0] !== 'Pause') throw new Error(`${label}: live HUD should expose only Pause, got ${hudActions}`)
+  const capId = await page.evaluate(() => window.__capball.pickable()[0]?.id)
+  if (capId === undefined) throw new Error(`${label}: no cap available for the flick-power readout check`)
+  const cap = await capScreen(page, capId)
+  await page.mouse.move(cap.x, cap.y)
+  await page.mouse.down()
+  await page.mouse.move(cap.x - 5, cap.y)
+  const pull = await page.locator('[data-aim-power]').evaluate(el => ({ hidden: el.hidden, level: el.dataset.level, value: el.querySelector('[role="meter"]').getAttribute('aria-valuenow') }))
+  if (pull.hidden || pull.level !== 'pull' || Number(pull.value) !== 0) throw new Error(`${label}: low-pull feedback missing or changed power mapping: ${JSON.stringify(pull)}`)
+  await page.mouse.up()
+  if (!(await page.locator('[data-aim-power]').evaluate(el => el.hidden))) throw new Error(`${label}: aim readout stayed visible after release`)
+
+  await page.click('.hud-tools [data-action="pause"]')
+  await page.waitForSelector('[data-modal="pause"].is-active')
+  const sheet = await page.locator('[data-modal="pause"].is-active .pause-sheet').evaluate(el => {
+    const r = el.getBoundingClientRect()
+    return { top: r.top, bottom: r.bottom, height: r.height, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight }
+  })
+  if (sheet.top < -1 || sheet.bottom > viewport.height + 1 || sheet.scrollHeight > sheet.clientHeight + 1) throw new Error(`${label}: pause sheet overflows or needs scrolling: ${JSON.stringify({ viewport, sheet })}`)
+  const actions = await page.locator('[data-modal="pause"].is-active .pause-sheet button:not([hidden])').evaluateAll(els => els.map(el => ({ label: el.textContent.trim(), height: el.getBoundingClientRect().height })))
+  if (actions.some(action => action.height < 44)) throw new Error(`${label}: pause sheet has a touch target below 44px: ${JSON.stringify(actions)}`)
+  for (const expected of ['Resume match', 'Restart', 'Rules', 'Sound on', 'New match', 'Concede match']) {
+    if (!actions.some(action => action.label === expected)) throw new Error(`${label}: pause sheet is missing ${expected}: ${JSON.stringify(actions)}`)
+  }
+  if (actions.some(action => action.label === 'Tuning tools')) throw new Error(`${label}: developer Tuning Tools leaked into a normal-player pause sheet`)
+
+  await page.locator('[data-modal="pause"] [data-action="rules"]').click()
+  await page.waitForSelector('[data-modal="rules"].is-active')
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('[data-modal="pause"].is-active')
+  if (await page.evaluate(() => document.activeElement?.dataset.action) !== 'rules') throw new Error(`${label}: closing Rules did not return focus to the pause sheet`)
+  await clickPauseAction(page, 'sound')
+  if (await page.locator('[data-modal="pause"] [data-action="sound"]').getAttribute('aria-pressed') !== 'false') throw new Error(`${label}: Sound Off state did not update`)
+  await clickPauseAction(page, 'sound')
+  if (await page.locator('[data-modal="pause"] [data-action="sound"]').getAttribute('aria-pressed') !== 'true') throw new Error(`${label}: Sound On state did not update`)
+  await page.keyboard.press('Escape')
+  await page.waitForFunction(() => !document.querySelector('[data-modal="pause"].is-active'))
+  const pauseClosed = await page.locator('[data-modal="pause"]').evaluate(el => !el.classList.contains('is-active'))
+  if (!pauseClosed || await page.evaluate(() => document.activeElement?.dataset.action) !== 'pause') throw new Error(`${label}: Escape did not resume and restore focus to Pause`)
 }
 
 async function firstRunTutorial(page) {
@@ -208,7 +280,10 @@ try {
     visible: [...document.querySelectorAll('[data-setting-row]:not([hidden])')].map(row => row.dataset.settingRow),
   }))
   if (!normalSettings.tuningHidden || JSON.stringify(normalSettings.visible) !== JSON.stringify(['commentary', 'speech', 'sound'])) throw new Error(`normal settings visibility mismatch: ${JSON.stringify(normalSettings)}`)
-  await page.waitForTimeout(260)
+  await page.waitForFunction(() => {
+    const sheet = document.querySelector('[data-modal="settings"] .sheet')
+    return !!sheet && Number(getComputedStyle(sheet).opacity) >= 0.95
+  }, null, { timeout: 2500 })
   const sheetOpacity = await page.locator('[data-modal="settings"] .sheet').evaluate(el => Number(getComputedStyle(el).opacity))
   if (sheetOpacity < 0.95) throw new Error(`settings sheet did not finish appearing: opacity=${sheetOpacity}`)
   await page.screenshot({ path: `${out}/01-menu-settings.png` })
@@ -220,6 +295,7 @@ try {
   if (!(await page.locator('[data-modal="settings"]').evaluate(el => !el.classList.contains('is-active')))) throw new Error('Escape did not close the settings dialog')
   if (await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) !== 'Open settings') throw new Error('closing settings did not restore focus to the gear')
   await firstRunTutorial(page)
+  await assertHudPause(page, 'desktop')
   await page.evaluate(() => window.__capball.match.events.emit('turn', { team: 0, reason: 'goalkick' }))
   await page.waitForSelector('[data-modal="rule-hint"].is-active')
   const ruleCard = await page.locator('[data-modal="rule-hint"]').innerText()
@@ -281,13 +357,14 @@ try {
   if (s.team !== 0) throw new Error('conceding team should kick off')
 
   // Rules panel + sound toggle.
-  await page.click('.hud-tools [data-action="rules"]')
+  await clickPauseAction(page, 'rules')
   await page.waitForSelector('[data-modal="rules"].is-active')
   await page.screenshot({ path: `${out}/05-rules.png` })
   await page.click('[data-modal="rules"] [data-action="closemodal"]')
-  await page.click('.hud-tools [data-action="sound"]')
+  await clickPauseAction(page, 'sound')
   if (!(await page.evaluate(() => window.__capball.settings.sound === false))) throw new Error('sound toggle failed')
-  await page.click('.hud-tools [data-action="sound"]')
+  await clickPauseAction(page, 'sound')
+  await clickPauseAction(page, 'resume')
 
   // Play shots until someone reaches the target.
   for (let k = 0; k < 8; k++) {
@@ -341,7 +418,7 @@ try {
   s = await state(page)
   if (s.goals[0] !== 0 || s.goals[1] !== 0 || s.phase !== 'aim') throw new Error(`restart failed ${JSON.stringify(s)}`)
   const counts1 = await page.evaluate(() => window.__capball.debugCounts())
-  await page.click('.hud-tools [data-action="newmatch"]')
+  await clickPauseAction(page, 'newmatch')
   await page.waitForSelector('[data-screen="start"].is-active')
   await startMode(page, 'mode:quick')
   const counts2 = await page.evaluate(() => window.__capball.debugCounts())
@@ -349,7 +426,7 @@ try {
   if (JSON.stringify(counts0) !== JSON.stringify(counts1) || JSON.stringify(counts1) !== JSON.stringify(counts2)) throw new Error('listener counts changed across restart/new match')
 
   // ---------- Round 2: tuning overlay + spin flick with a real off-centre grab ----------
-  await page.click('.hud-tools [data-action="newmatch"]')
+  await clickPauseAction(page, 'newmatch')
   await page.waitForSelector('[data-screen="start"].is-active')
   const debugUrl = new URL(url)
   debugUrl.searchParams.set('debug', '1')
@@ -361,8 +438,11 @@ try {
   await page.click('[data-setting-switch="tuning"]')
   await page.click('[data-modal="settings"] [data-action="closemodal"]')
   await startMode(page, 'mode:quick')
+  await page.click('.hud-tools [data-action="pause"]')
   if (!(await page.isVisible('[data-tune-btn]'))) throw new Error('Tune button not shown with tuning tools on')
-  await page.click('[data-tune-btn]')
+  await clickPauseAction(page, 'tune')
+  await page.locator('[data-modal="pause"] [data-action="resume"]').evaluate(el => el.click())
+  await page.waitForFunction(() => !document.querySelector('[data-modal="pause"].is-active'))
   await page.waitForSelector('.tune:not([hidden])')
   {
     const c = await capScreen(page, 4)
@@ -396,14 +476,15 @@ try {
     if (reset !== before) throw new Error(`reset did not restore curl: ${reset} vs ${before}`)
     // No stacking across restart / new match with the overlay attached.
     const t0 = await page.evaluate(() => window.__capball.debugCounts())
-    await page.click('.hud-tools [data-action="restart"]')
-    await page.click('.hud-tools [data-action="newmatch"]')
+    await page.evaluate(() => window.__capball.tune.setOpen(false))
+    await clickPauseAction(page, 'restart')
+    await clickPauseAction(page, 'newmatch')
     await page.waitForSelector('[data-screen="start"].is-active')
     await startMode(page, 'mode:quick')
     const t1 = await page.evaluate(() => window.__capball.debugCounts())
     console.log('smoke: overlay counts', JSON.stringify({ t0, t1 }))
     if (JSON.stringify(t0) !== JSON.stringify(t1) || t1.overlays !== 1) throw new Error('overlay listeners changed across restart/new match')
-    await page.click('.hud-tools [data-action="newmatch"]')
+    await clickPauseAction(page, 'newmatch')
     await page.waitForSelector('[data-screen="start"].is-active')
     await page.click('[data-action="settings"]')
     await page.waitForSelector('[data-modal="settings"].is-active')
@@ -435,7 +516,7 @@ try {
     await page.waitForTimeout(900)
     await page.screenshot({ path: `${out}/24-corner.png` })
   }
-  await page.click('.hud-tools [data-action="newmatch"]')
+  await clickPauseAction(page, 'newmatch')
   await page.waitForSelector('[data-screen="start"].is-active')
   await page.click('[data-action="mode:quick"]')
   await page.waitForSelector('[data-screen="setup"].is-active')
@@ -449,7 +530,7 @@ try {
     const info = await page.evaluate(() => ({ surface: window.__capball.match.world.surface.id, rules: window.__capball.match.ruleset.id, offside: window.__capball.match.ruleset.offside, timed: !!window.__capball.match.ruleset.halves }))
     if (info.surface !== surf || info.rules !== 'proper' || !info.offside || !info.timed) throw new Error(`setup not applied: ${JSON.stringify(info)}`)
     if (surf !== 'park') await page.screenshot({ path: `${out}/12-surface-${surf}.png` })
-    await page.click('.hud-tools [data-action="newmatch"]')
+    await clickPauseAction(page, 'newmatch')
     await page.click('[data-action="mode:quick"]')
     await page.waitForSelector('[data-screen="setup"].is-active')
   }
@@ -477,7 +558,7 @@ try {
   await page.screenshot({ path: `${out}/14-powershot-armed.png` })
 
   // ---------- Phase 3: cap designer ----------
-  await page.click('.hud-tools [data-action="newmatch"]')
+  await clickPauseAction(page, 'newmatch')
   await page.waitForSelector('[data-screen="start"].is-active')
   await page.click('[data-screen="start"] [data-action="editor"]')
   await page.waitForSelector('[data-screen="editor"].is-active')
@@ -650,6 +731,7 @@ try {
   await pp.click('[data-modal="settings"] [data-action="closemodal"]')
   await pp.screenshot({ path: `${out}/07-phone-start.png` })
   await startMode(pp, 'mode:quick', true)
+  await assertHudPause(pp, 'phone portrait')
   const cdp = await phone.newCDPSession(pp)
   const t0 = await capScreen(pp, 4)
   const touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] })
@@ -678,6 +760,7 @@ try {
   await assertStartMenu(lp, 'phone landscape')
   await lp.screenshot({ path: `${out}/10-phone-landscape-start.png` })
   await startMode(lp, 'mode:quick', true)
+  await assertHudPause(lp, 'phone landscape')
   await lp.screenshot({ path: `${out}/10-phone-landscape.png` })
   await land.close()
 
@@ -716,8 +799,9 @@ try {
   await onlineA.waitForFunction(() => window.__capball.onlineState?.ready === false && window.__capball.onlineClient?.state === 'open', null, { timeout: 15000 })
   const room = await onlineA.evaluate(() => window.__capball.onlineClient.room)
   if (!room) throw new Error('room server did not assign a room code')
-  await onlineA.click('[data-action="online-copy"]')
+  await clickPauseAction(onlineA, 'online-copy')
   await onlineA.waitForFunction(code => document.querySelector('[data-caption]')?.textContent.includes(code), room, { timeout: 5000 })
+  await clickPauseAction(onlineA, 'resume')
   await onlineA.screenshot({ path: `${out}/26-online-waiting.png` })
 
   const invite = new URL(url)
