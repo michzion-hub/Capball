@@ -15,11 +15,15 @@ export interface Settings {
   shake: boolean
   /** Developer tuning overlay (sliders, vectors, flick stats). */
   tuning: boolean
+  /** Night-street theme: stored with the rest of the settings and applied on boot. */
+  dark: boolean
   teams: [TeamDesign, TeamDesign]
   ruleset: string
   surface: string
   flags: Record<string, boolean>
   aiLevel: AiLevel
+  /** Street Tournament variant: false = pass-and-play Local 2P, true = human crew vs AI rivals. */
+  tournamentAi: boolean
   penaltyTimeout: PenaltyTimeoutAction
   tutorialPrompted: boolean
   tutorialStep: number
@@ -37,7 +41,7 @@ export function defaultTeam(i: 0 | 1): TeamDesign {
 }
 
 export function defaultSettings(): Settings {
-  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium', penaltyTimeout: 'straight', tutorialPrompted: false, tutorialStep: 0, ruleHintsSeen: {} }
+  return { sound: true, commentary: true, speech: false, replays: true, shake: true, tuning: false, dark: false, teams: [defaultTeam(0), defaultTeam(1)], ruleset: 'street', surface: 'park', flags: {}, aiLevel: 'medium', tournamentAi: false, penaltyTimeout: 'straight', tutorialPrompted: false, tutorialStep: 0, ruleHintsSeen: {} }
 }
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -71,11 +75,13 @@ export function loadSettings(storage: Pick<Storage, 'getItem'> | null = safeStor
       replays: typeof p.replays === 'boolean' ? p.replays : d.replays,
       shake: typeof p.shake === 'boolean' ? p.shake : d.shake,
       tuning: typeof p.tuning === 'boolean' ? p.tuning : d.tuning,
+      dark: typeof p.dark === 'boolean' ? p.dark : d.dark,
       teams: [sanitizeTeam(p.teams?.[0], 0), sanitizeTeam(p.teams?.[1], 1)],
       ruleset: typeof p.ruleset === 'string' ? p.ruleset : d.ruleset,
       surface: typeof p.surface === 'string' ? p.surface : d.surface,
       flags: p.flags && typeof p.flags === 'object' ? Object.fromEntries(Object.entries(p.flags).filter(([, v]) => typeof v === 'boolean')) : {},
       aiLevel: p.aiLevel === 'easy' || p.aiLevel === 'hard' ? p.aiLevel : 'medium',
+      tournamentAi: typeof p.tournamentAi === 'boolean' ? p.tournamentAi : d.tournamentAi,
       penaltyTimeout: p.penaltyTimeout === 'forfeit' ? 'forfeit' : 'straight',
       tutorialPrompted: typeof p.tutorialPrompted === 'boolean' ? p.tutorialPrompted : d.tutorialPrompted,
       tutorialStep: typeof p.tutorialStep === 'number' && Number.isFinite(p.tutorialStep) ? Math.max(0, Math.min(7, Math.floor(p.tutorialStep))) : d.tutorialStep,

@@ -34,4 +34,19 @@ describe('CAPBALL AI', () => {
       match.destroy()
     }
   }, 20_000)
+
+  it('takes hidden penalties toward a legal corner of the attacked goal', () => {
+    for (const level of ['easy', 'medium', 'hard'] as const) {
+      const brain = new AiBrain(RULESETS.street, 'park', level, 0.61)
+      for (let i = 0; i < 12; i++) {
+        const shot = brain.penaltyShot(1)
+        expect(Math.hypot(shot.direction.x, shot.direction.y)).toBeCloseTo(1, 5)
+        expect(shot.direction.x).toBeGreaterThan(0)
+        expect(Math.abs(shot.direction.y)).toBeLessThan(0.7)
+        expect(shot.power).toBeGreaterThanOrEqual(0.55)
+        expect(shot.power).toBeLessThanOrEqual(1)
+        expect(brain.penaltyShot(0).direction.x).toBeLessThan(0)
+      }
+    }
+  })
 })

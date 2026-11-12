@@ -1,6 +1,7 @@
 import type { TeamIndex } from '../physics/world'
 import type { TeamDesign } from '../render/capArt'
 import type { RuleHintContent } from '../game/ruleHints'
+import type { OnlineDiagnosticsView } from '../net/diagnostics'
 
 export type Action = string
 
@@ -98,7 +99,7 @@ export class UI {
   show(screen: string): void {
     for (const s of this.$$('[data-screen]')) s.classList.toggle('is-active', s.dataset.screen === screen)
     this.root.dataset.current = screen
-    if (screen !== 'hud') this.clearOverlays()
+    if (screen !== 'hud') { this.clearOverlays(); this.showOnlineWait(null) }
   }
 
   /** Drop any in-flight banner/caption (they belong to the match that produced them). */
@@ -325,6 +326,37 @@ export class UI {
     this.setTutorialPauseMode(!this.$('[data-tutorial-leave]').hidden)
   }
 
+  /**
+   * Local connection readout for the pause sheet. Numbers only: no player input, no
+   * penalty choice and nothing the other seat can use. Pass null when offline.
+   */
+  setOnlineDiagnostics(view: OnlineDiagnosticsView | null): void {
+    const block = this.$('[data-online-diag]')
+    if (!view) { block.hidden = true; return }
+    block.hidden = false
+    const put = (key: string, text: string) => {
+      const cell = this.$(`[data-diag="${key}"]`)
+      if (cell.textContent !== text) cell.textContent = text
+    }
+    const ms = (n: number | null) => n === null ? '—' : `${Math.round(n)} ms`
+    put('rtt', ms(view.rttMs))
+    put('jitter', ms(view.jitterMs))
+    put('seq', String(view.seq))
+    put('correction', view.corrections ? `${Math.round(view.lastCorrectionPx)} px` : '—')
+    put('reconnects', String(view.reconnects))
+    put('link', view.link)
+    block.dataset.link = view.link
+  }
+
+  /** Show the room code while the second seat is still empty (or the link is reconnecting). */
+  showOnlineWait(room: string | null, copy = 'Waiting for your mate to join. Share the invite link or room code.'): void {
+    const card = this.$('[data-online-wait]')
+    if (!room) { card.hidden = true; return }
+    this.$('[data-online-wait-code]').textContent = room
+    this.$('[data-online-wait-copy]').textContent = copy
+    card.hidden = false
+  }
+
   showRuleHint(view: RuleHintContent): void {
     const modal = this.$('[data-modal="rule-hint"]')
     modal.dataset.ruleHintKey = view.key
@@ -411,6 +443,7 @@ const TEMPLATE = /* html */ `
 <section class="screen screen-online" data-screen="online"><div class="online-wrap" data-online></div></section>
 <section class="screen screen-editor" data-screen="editor"><div class="editor-wrap" data-editor></div></section>
 <section class="screen screen-bracket" data-screen="bracket"><div class="bracket-wrap" data-bracket></div></section>
+<section class="screen screen-cup" data-screen="cup"><div class="cup-wrap" data-cup></div></section>
 
 <section class="screen screen-hud" data-screen="hud">
   <header class="scorebar" aria-label="Match scoreboard">
@@ -422,6 +455,12 @@ const TEMPLATE = /* html */ `
     <div class="slip right" data-team-slip="1"><span class="slip-score">0</span><span class="slip-name"></span><span class="slip-cap"></span></div>
   </header>
   <div class="meters" data-meters></div>
+  <aside class="online-wait" data-online-wait hidden aria-label="Online room">
+    <span class="online-wait-kicker">Private room</span>
+    <strong class="online-wait-code" data-online-wait-code>------</strong>
+    <p class="online-wait-copy" data-online-wait-copy>Waiting for your mate to join.</p>
+    <button class="btn ghost" type="button" data-action="online-copy">Copy invite link</button>
+  </aside>
   <nav class="hud-tools" aria-label="Match controls">
     <button class="tool tool-pause" type="button" data-action="pause" aria-label="Open match pause menu" title="Pause match">
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>Pause</span>
@@ -508,7 +547,7 @@ const TEMPLATE = /* html */ `
     <div class="tape tape-b"></div>
     <span class="settings-kicker">Match atmosphere</span>
     <h2 id="settings-title">Settings</h2>
-    <p class="settings-intro">Turn the sideline noise on or off.</p>
+    <p class="settings-intro">Turn the sideline noise on or off, and pick how the street looks.</p>
     <div class="settings-list" data-settings-options>
       <div class="setting-row" data-setting-row="commentary">
         <div class="setting-copy"><span class="setting-title" id="setting-commentary-title">Commentary</span><span class="setting-description" id="setting-commentary-description" data-setting-description="commentary">On-screen match calls and captions.</span></div>
@@ -521,6 +560,10 @@ const TEMPLATE = /* html */ `
       <div class="setting-row" data-setting-row="sound">
         <div class="setting-copy"><span class="setting-title" id="setting-sound-title">Sound</span><span class="setting-description" id="setting-sound-description" data-setting-description="sound">Whistles, impacts and crowd audio.</span></div>
         <button class="setting-switch" type="button" role="switch" data-setting-switch="sound" data-action="toggle:sound" aria-checked="true" aria-labelledby="setting-sound-title" aria-describedby="setting-sound-description"><span data-setting-state>On</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
+      </div>
+      <div class="setting-row" data-setting-row="dark">
+        <div class="setting-copy"><span class="setting-title" id="setting-dark-title">Dark Mode</span><span class="setting-description" id="setting-dark-description" data-setting-description="dark">Streetlights on: menus, pitch and dialogs go dark. Remembered next visit.</span></div>
+        <button class="setting-switch" type="button" role="switch" data-setting-switch="dark" data-action="toggle:dark" aria-checked="false" aria-labelledby="setting-dark-title" aria-describedby="setting-dark-description"><span data-setting-state>Off</span><span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span></button>
       </div>
       <div class="setting-row" data-setting-row="tuning" hidden>
         <div class="setting-copy"><span class="setting-title" id="setting-tuning-title">Tuning Tools</span><span class="setting-description" id="setting-tuning-description" data-setting-description="tuning">Developer-only game tuning panel.</span></div>
@@ -596,6 +639,14 @@ const TEMPLATE = /* html */ `
       <button class="btn ghost tool-tune" type="button" data-action="tune" title="Developer tuning overlay" data-tune-btn hidden>Tuning tools</button>
       <button class="btn ghost" type="button" data-action="tutorial:leave" data-tutorial-leave hidden>Save &amp; leave tutorial</button>
     </div>
+    <dl class="online-diag" data-online-diag hidden aria-label="Connection diagnostics">
+      <div><dt>Ping</dt><dd data-diag="rtt">—</dd></div>
+      <div><dt>Jitter</dt><dd data-diag="jitter">—</dd></div>
+      <div><dt>Snapshot</dt><dd data-diag="seq">—</dd></div>
+      <div><dt>Correction</dt><dd data-diag="correction">—</dd></div>
+      <div><dt>Reconnects</dt><dd data-diag="reconnects">0</dd></div>
+      <div><dt>Link</dt><dd data-diag="link">idle</dd></div>
+    </dl>
     <button class="btn ghost pause-concede" type="button" data-action="concede-match" data-pause-concede>Concede match</button>
   </div>
 </div>

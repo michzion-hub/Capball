@@ -112,6 +112,54 @@ export const TUTORIAL_RULESET: Ruleset = {
 export type RulesetId = keyof typeof RULESETS
 export const RULESET_ORDER: RulesetId[] = ['street', 'proper', 'arcade', 'basic']
 
+/** A named, versioned preset that can travel between online clients. */
+export interface RulesProfile {
+  id: string
+  version: number
+  name: string
+  blurb: string
+  ruleset: Ruleset
+}
+
+/**
+ * The online invite default. Every value is pinned here (not inherited silently) so a
+ * change to the local `proper` preset cannot alter rooms that players have already shared.
+ * Bump `version` whenever any value below changes.
+ */
+export const INVITE_PROFILE: RulesProfile = {
+  id: 'proper-invite',
+  version: 1,
+  name: 'Proper Football · Invite',
+  blurb: 'Two 3-minute halves, last-touch end lines and hidden penalties with the keeper on their line.',
+  ruleset: {
+    ...RULESETS.proper,
+    id: 'proper-invite',
+    name: 'Proper Football · Invite',
+    blurb: 'Two 3-minute halves, corners, free kicks, penalties, offside, last-touch end lines, hidden penalties, keeper on the line, straight-shot timeout.',
+    goalsToWin: null,
+    halves: { count: 2, seconds: 180 },
+    corners: true,
+    freeKicks: true,
+    penalties: true,
+    offside: true,
+    outBy: 'lastTouch',
+    hiddenPenalties: true,
+    keeperMayLeaveLine: false,
+    penaltyTimeout: 'straight',
+  },
+}
+
+/** Server allowlist: only profiles compiled into this build may host a room. */
+export const ONLINE_PROFILES: readonly RulesProfile[] = [INVITE_PROFILE]
+
+export function getOnlineProfile(id: unknown, version: unknown): RulesProfile | null {
+  return ONLINE_PROFILES.find(p => p.id === id && p.version === version) ?? null
+}
+
+export function profileInfo(profile: RulesProfile): { id: string; version: number; name: string } {
+  return { id: profile.id, version: profile.version, name: profile.name }
+}
+
 export function getRuleset(id: string): Ruleset {
   return (RULESETS as Record<string, Ruleset>)[id] ?? RULESETS.street
 }

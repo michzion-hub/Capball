@@ -1,6 +1,6 @@
 import { RULESETS, RULESET_ORDER, getRuleset } from '../config/rulesets'
 import type { Ruleset } from '../config/rulesets'
-import { AI, SURFACES } from '../config/tuning'
+import { AI, SURFACES, SURFACE_IDS } from '../config/tuning'
 import type { AiLevel, SurfaceId } from '../config/tuning'
 import { esc } from './ui'
 
@@ -49,7 +49,7 @@ export function buildRuleset(presetId: string, overrides: Record<string, boolean
   return r
 }
 
-export function setupHtml(o: { title: string; sub: string; presetId: string; overrides: Record<string, boolean>; surface: SurfaceId; showRules: boolean; goLabel: string; showAi?: boolean; aiLevel?: AiLevel; penaltyTimeout?: Ruleset['penaltyTimeout']; allowHiddenPenalties?: boolean }): string {
+export function setupHtml(o: { title: string; sub: string; presetId: string; overrides: Record<string, boolean>; surface: SurfaceId; showRules: boolean; goLabel: string; showAi?: boolean; aiLevel?: AiLevel; aiLabel?: string; showTournament?: boolean; tournamentAi?: boolean; penaltyTimeout?: Ruleset['penaltyTimeout']; allowHiddenPenalties?: boolean }): string {
   const r = buildRuleset(o.presetId, o.overrides, o.penaltyTimeout)
   const presets = RULESET_ORDER.map(id => {
     const p = RULESETS[id]
@@ -67,7 +67,7 @@ export function setupHtml(o: { title: string; sub: string; presetId: string; ove
     <button class="opt ${(o.penaltyTimeout ?? r.penaltyTimeout) === 'straight' ? 'is-on' : ''}" data-action="penalty-timeout:straight"><b>Straight shot</b><small>Default kick at goal</small></button>
     <button class="opt ${(o.penaltyTimeout ?? r.penaltyTimeout) === 'forfeit' ? 'is-on' : ''}" data-action="penalty-timeout:forfeit"><b>Forfeit</b><small>Deliberate miss</small></button>
   </div>` : ''
-  const surfaces = (Object.keys(SURFACES) as SurfaceId[]).map(id => {
+  const surfaces = SURFACE_IDS.map(id => {
     const s = SURFACES[id]
     return `<button class="opt ${id === o.surface ? 'is-on' : ''}" data-action="surface:${id}"><b>${esc(s.name)}</b><small>${esc(s.blurb)}</small></button>`
   }).join('')
@@ -75,11 +75,19 @@ export function setupHtml(o: { title: string; sub: string; presetId: string; ove
     const level = AI.levels[id]
     return `<button class="opt ${(o.aiLevel ?? 'medium') === id ? 'is-on' : ''}" data-action="ai-level:${id}"><b>${level.name}</b><small>${level.blurb}</small></button>`
   }).join('')
+  const tournamentChoice = o.showTournament ? `<div class="opt-group" data-tournament-choice>
+      <label>Who plays the tournament?</label>
+      <div class="opts tournament-opts">
+        <button class="opt ${o.tournamentAi ? '' : 'is-on'}" data-action="tournament-ai:no"><b>Local 2P</b><small>Pass the phone. Four crews, two humans.</small></button>
+        <button class="opt ${o.tournamentAi ? 'is-on' : ''}" data-action="tournament-ai:yes"><b>Versus AI</b><small>Your crew takes on three street rivals.</small></button>
+      </div>
+    </div>` : ''
   return `
     <div class="tape tape-b"></div>
     <h2>${esc(o.title)}</h2>
     <p class="sub">${esc(o.sub)}</p>
-    ${o.showAi ? `<div class="opt-group"><label>Pick your opponent</label><div class="opts">${aiLevels}</div></div>` : ''}
+    ${tournamentChoice}
+    ${o.showAi ? `<div class="opt-group"><label>${esc(o.aiLabel ?? 'Pick your opponent')}</label><div class="opts">${aiLevels}</div></div>` : ''}
     ${o.showRules ? `
     <div class="opt-group"><label>Rules</label><div class="opts">${presets}</div>
       <div class="flags">${flags}</div>

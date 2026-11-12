@@ -122,7 +122,7 @@ export const LINEUP: CapTypeId[] = ['keeper', 'defender', 'defender', 'winger', 
 /** Phase 1 lineup: five identical caps. */
 export const PLAIN_LINEUP: CapTypeId[] = ['standard', 'standard', 'standard', 'standard', 'standard']
 
-export type SurfaceId = 'park' | 'dusty' | 'rooftop' | 'court' | 'slope'
+export type SurfaceId = 'park' | 'dusty' | 'rooftop' | 'court' | 'slope' | 'carpark'
 
 export interface Surface {
   id: SurfaceId
@@ -145,6 +145,14 @@ export const SURFACES: Record<SurfaceId, Surface> = {
   rooftop: { id: 'rooftop', name: 'Rooftop', blurb: 'Tar paper up high. Concrete ledges kill bounce.', frictionScale: 0.95, boardBounce: 0.3, slope: { x: 0, y: 0 }, dust: 0.25, dustColor: '#b9b9c2' },
   court: { id: 'court', name: 'Slippery Court', blurb: 'Fresh lacquer. Everything skates and the boards spring.', frictionScale: 0.5, boardBounce: 0.85, slope: { x: 0, y: 0 }, dust: 0, dustColor: '#ffffff' },
   slope: { id: 'slope', name: 'The Hill', blurb: 'Built on a slope. Rolls drift toward the bottom touchline.', frictionScale: 1, boardBounce: 0.55, slope: { x: 0, y: 3.2 }, dust: 0.3, dustColor: '#b7c98a' },
+  carpark: { id: 'carpark', name: 'Multi-Storey', blurb: 'Painted concrete. Level ground, lively kickboards.', frictionScale: 0.88, boardBounce: 0.72, slope: { x: 0, y: 0 }, dust: 0.2, dustColor: '#c3bfb4' },
+}
+
+/** Every selectable pitch, in menu order. Used by setup and by the online room allowlist. */
+export const SURFACE_IDS: SurfaceId[] = ['park', 'dusty', 'rooftop', 'court', 'slope', 'carpark']
+
+export function isSurfaceId(value: unknown): value is SurfaceId {
+  return typeof value === 'string' && (SURFACE_IDS as string[]).includes(value)
 }
 
 export const FX = {

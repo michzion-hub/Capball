@@ -2,9 +2,9 @@ import { Audio } from './audio/audio'
 import { Commentator, Voice } from './audio/commentary'
 import type { CallKind, CallVars } from './audio/commentary'
 import { Crowd } from './audio/crowd'
-import { RULESETS, TUTORIAL_RULESET } from './config/rulesets'
+import { getOnlineProfile, INVITE_PROFILE, TUTORIAL_RULESET } from './config/rulesets'
 import type { Ruleset } from './config/rulesets'
-import { AI, BALL, CAP_TYPES, FX, INPUT, PITCH, SURFACES } from './config/tuning'
+import { AI, BALL, CAP_TYPES, FX, INPUT, PITCH, SURFACES, SURFACE_IDS } from './config/tuning'
 import { FOOTBALL } from './config/football'
 import type { AiLevel, SurfaceId } from './config/tuning'
 import { AiBrain, captureBoard } from './ai/brain'
@@ -16,11 +16,13 @@ import type { Outcome, TrackerEvent, Whistle } from './game/play'
 import { HiddenPenalty, legalKeeperPosition } from './game/penalty'
 import { ReplayRecorder } from './game/replay'
 import type { ReplayClip } from './game/replay'
+import { RenderInterpolator } from './net/smoothing'
+import type { Pose } from './net/smoothing'
 import { MatchStatistics } from './game/summary'
 import { TutorialProgress, TUTORIAL_COMPLETE_STEP, TUTORIAL_STEPS } from './game/tutorial'
 import { makeRuleHint } from './game/ruleHints'
 import type { RuleHintKey } from './game/ruleHints'
-import { RIVAL_CREWS, Tournament } from './game/tournament'
+import { AI_RIVAL_CREWS, RIVAL_CREWS, Tournament, simulateAiTie } from './game/tournament'
 import type { Tie } from './game/tournament'
 import type { TurnReason } from './game/turns'
 import { TuneOverlay, activeOverlays } from './debug/overlay'
@@ -37,15 +39,35 @@ import { drawPreviews, editorHtml, resolveKits } from './ui/editor'
 import { buildRuleset, setupHtml } from './ui/setup'
 import { UI, esc } from './ui/ui'
 import type { MatchSummaryView, TutorialCoachView } from './ui/ui'
-import { OnlineClient } from './net/client'
+import { OnlineClient, ONLINE_NOT_CONFIGURED, probeOnlineConfig } from './net/client'
 import type { LinkState } from './net/client'
-import type { FlickMessage, NetworkState, ServerMessage } from './net/protocol'
+import { penaltyCommitText, randomNonce, sha256Hex } from './net/protocol'
+import type { FlickMessage, NetworkPenalty, NetworkState, PenaltyChoice, PenaltyShotMessage, ServerMessage } from './net/protocol'
 
 export const TURN_LABEL: Record<TurnReason, string> = {
   kickoff: 'kick off', normal: 'your flick', bonus: 'BONUS FLICK!', freekick: 'free kick', penalty: 'penalty!',
   corner: 'corner', goalkick: 'goal kick', dropball: 'dropped ball', offside: 'free kick (offside)', halftime: 'second half',
   keeper: 'slide your keeper', shootout: 'take the penalty',
 }
+
+/** Street-zine cup: fat marker outline, printed gradient and a hand-cut star. */
+const CUP_TROPHY_SVG = `<svg class="cup-svg" viewBox="0 0 220 240" role="img" aria-label="The CAPBALL street cup" focusable="false">
+  <defs>
+    <linearGradient id="cup-shine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd23f"/><stop offset=".55" stop-color="#ff8a1f"/><stop offset="1" stop-color="#e8262b"/>
+    </linearGradient>
+  </defs>
+  <g stroke="var(--ink)" stroke-width="7" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M70 28h80v40c0 31-18 54-40 54s-40-23-40-54z" fill="url(#cup-shine)"/>
+    <path d="M70 40H44c0 34 12 50 34 52" fill="none"/>
+    <path d="M150 40h26c0 34-12 50-34 52" fill="none"/>
+    <path d="M97 122h26v26H97z" fill="var(--cap)"/>
+    <path d="M76 148h68l9 24H67z" fill="var(--paper2)"/>
+    <path d="M84 172h52v16H84z" fill="var(--ink)"/>
+    <path d="M62 210h96" fill="none"/>
+  </g>
+  <path d="M110 42l7 15 16 2-12 11 3 16-14-8-14 8 3-16-12-11 16-2z" fill="var(--paper)" stroke="var(--ink)" stroke-width="5" stroke-linejoin="round"/>
+</svg>`
 
 type Mode = 'quick' | 'ai' | 'shootout' | 'tournament' | 'online' | 'tutorial'
 
@@ -76,11 +98,17 @@ export class App {
   private currentTie: Tie | null = null
   /** Tied tournament match waiting for its shootout. */
   private pendingTie: { tie: Tie; goals: [number, number] } | null = null
+  /** Versus-AI bracket: human is crew 0, AI-only fixtures resolve deterministically. */
+  private aiTournament = false
+  private tournamentSeed = 1
+  private tournamentRules: Ruleset | null = null
   private aim: FlickAim | null = null
   private aiBrain: AiBrain | null = null
   private aiEpoch = 0
   private aiThinkMs = 0
   private aiDragMs = 0
+  private aiKeeperMs = 0
+  private penaltyAiMs = 0
   private aiBusy = false
   private aiDecision: Decision | null = null
   private onlineClient: OnlineClient | null = null
@@ -114,6 +142,15 @@ export class App {
   private hiddenPenalty: HiddenPenalty | null = null
   private penaltyRevealTimer = 0
   private penaltyTimerSecond = -1
+  private onlinePenaltyId = -1
+  private onlinePenaltyRole: 'keeper' | 'shot' | null = null
+  private onlinePenaltySeal: { choice: PenaltyChoice; nonce: string; commit: string } | null = null
+  private onlinePenaltyCommitted = false
+  private onlinePenaltyRevealSent = false
+  private onlinePenaltyStage: 'commit' | 'reveal' | null = null
+  /** Render-only settle for authoritative online corrections; never touches match physics. */
+  private readonly onlineSmoother = new RenderInterpolator()
+  private onlineDiagMs = 0
   private restartZone: { kind: Outcome['kind']; team: TeamIndex; at: Vec | null; end: 0 | 1 | null; retake: boolean } | null = null
   private confirmAction: 'concede' | null = null
 
@@ -124,6 +161,7 @@ export class App {
     this.teams = resolveKits(this.settings.teams[0], this.settings.teams[1])
     this.ruleset = buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout)
     this.renderer = new Renderer(canvas, this.teams)
+    this.applyTheme()
     this.renderer.layers.push(ctx => this.drawRestartZone(ctx))
     this.renderer.layers.push(ctx => this.particles.draw(ctx, [0]))
     this.renderer.overLayers.push(ctx => this.particles.draw(ctx, [1, 2]))
@@ -195,15 +233,20 @@ export class App {
         <button class="btn ghost menu-main" data-main-mode="shootout" data-action="mode:shootout">Penalty Shootout</button>
         <button class="btn ghost menu-main" data-main-mode="tournament" data-action="mode:tournament">Street Tournament</button>
       </div>
-      <details class="start-more">
-        <summary>Other modes &amp; help</summary>
-        <div class="start-more-actions">
-          <button class="chip" data-action="tutorial:entry">${tutorialLabel}</button>
-          <button class="chip" data-action="rules">How to play</button>
-          <button class="chip" data-action="mode:ai">Play the AI</button>
-          <button class="chip" data-action="mode:online">Online · invite a mate</button>
-        </div>
-      </details>`)
+      <div class="start-utility">
+        <button class="chip invite-entry" type="button" data-action="mode:online" data-invite-entry>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="9" cy="8" r="3.4"/><path d="M3 19.5c0-3.2 2.7-5.5 6-5.5s6 2.3 6 5.5"/><path d="M18.5 8v6M15.5 11h6"/></svg>
+          Invite a Mate
+        </button>
+        <details class="start-more">
+          <summary>Other modes &amp; help</summary>
+          <div class="start-more-actions">
+            <button class="chip" data-action="tutorial:entry">${tutorialLabel}</button>
+            <button class="chip" data-action="rules">How to play</button>
+            <button class="chip" data-action="mode:ai">Play the AI</button>
+          </div>
+        </details>
+      </div>`)
   }
 
   private startTutorial(replayFromStart = false): void {
@@ -436,17 +479,52 @@ export class App {
   }
 
   private openOnline(): void {
-    const sharedRoom = new URL(location.href).searchParams.get('room')?.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) ?? ''
+    const typed = this.ui?.root.querySelector<HTMLInputElement>('[data-input="online-code"]')?.value ?? ''
+    const sharedRoom = (typed || new URL(location.href).searchParams.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8)
+    const pitches = SURFACE_IDS.map(id => `<button class="opt ${id === this.surface ? 'is-on' : ''}" data-action="surface:${id}"><b>${esc(SURFACES[id].name)}</b><small>${esc(SURFACES[id].blurb)}</small></button>`).join('')
     this.ui.html('[data-online]', `<div class="online-card">
-      <span class="kicker">Street league · no accounts</span><h2>Bring a mate</h2>
-      <p>Create a private room link, or punch in the code your mate sent. Both players flick the same match; the room server settles every bounce and call.</p>
-      <button class="btn" data-action="online:create">Create room</button>
+      <span class="kicker">Two devices · one pitch · no accounts</span><h2>Invite a Mate</h2>
+      <p class="online-lede">A real head-to-head on two phones or laptops. The room server owns the ball, so both players see the same bounce and the same call.</p>
+      <ol class="online-steps">
+        <li><span class="online-step-n" aria-hidden="true">1</span><div><strong>Create a room</strong><p>One player starts the room here, then sends the link.</p></div></li>
+        <li><span class="online-step-n" aria-hidden="true">2</span><div><strong>Send the link</strong><p>Copy the invite link, or read out the 4–8 character room code.</p></div></li>
+        <li><span class="online-step-n" aria-hidden="true">3</span><div><strong>Flick together</strong><p>Each player controls one crew on their own device. The server settles every bounce.</p></div></li>
+      </ol>
+      <div class="online-preset" data-online-preset>
+        <strong>Rules: ${esc(INVITE_PROFILE.name)}</strong>
+        <span>Two 3-minute halves · last-touch end lines · hidden penalties · keeper stays on the line · straight-shot timeout. The host's room carries the rules; both players play the same match.</span>
+      </div>
+      <div class="opt-group online-pitch"><label>Pitch (the host's choice travels with the room)</label><div class="opts">${pitches}</div></div>
+      <p class="online-config" data-online-config data-state="checking" role="status">Checking whether online rooms are set up for this build…</p>
+      <button class="btn" data-action="online:create" disabled>Create room</button>
       <label class="online-code"><span>Room code</span><input data-input="online-code" value="${esc(sharedRoom)}" maxlength="8" autocomplete="off" autocapitalize="characters" placeholder="e.g. 7K4M2B"></label>
-      <button class="btn ghost" data-action="online:join">Join room</button>
-      <p class="online-status" data-online-status role="status">Online rooms need the CAPBALL game server.</p>
+      <button class="btn ghost" data-action="online:join" disabled>Join room</button>
+      <p class="online-status" data-online-status role="status" aria-live="polite"></p>
+      <p class="online-alt">No second device? Quick Match, the AI and the Street Tournament are pass-and-play on this one.</p>
       <button class="chip" data-action="online:back">Back to menu</button>
     </div>`)
     this.ui.show('online')
+    void this.checkOnline(sharedRoom)
+  }
+
+  private async checkOnline(sharedRoom: string): Promise<void> {
+    const config = await probeOnlineConfig()
+    if (this.mode !== 'online' || this.ui.root.dataset.current !== 'online') return
+    const note = this.ui.root.querySelector<HTMLElement>('[data-online-config]')
+    const create = this.ui.root.querySelector<HTMLButtonElement>('[data-action="online:create"]')
+    const join = this.ui.root.querySelector<HTMLButtonElement>('[data-action="online:join"]')
+    if (!config.ok) {
+      if (note) {
+        note.dataset.state = 'off'
+        note.textContent = 'Online rooms are not configured in this build — there is no public room server for an invite link to reach. Pass-and-play, Quick Match, the AI and the Street Tournament all still work on this device.'
+      }
+      this.onOnlineStatus('unavailable', 'Invite links need a public room server; this build has none configured.')
+      return
+    }
+    if (note) { note.dataset.state = 'ready'; note.textContent = 'Online rooms are ready in this build. Create a room or join one with a code.' }
+    if (create) create.disabled = false
+    if (join) join.disabled = false
+    this.onOnlineStatus('idle', '')
     if (sharedRoom) void this.connectOnline(sharedRoom)
   }
 
@@ -455,27 +533,44 @@ export class App {
     this.onlineTeam = null
     this.lastOnlineGoalSeq = 0
     this.pendingOnlineActions.clear()
-    await this.onlineClient?.connect(room)
+    await this.onlineClient?.connect(room, { design: this.settings.teams[0], surface: this.surface })
+  }
+
+  /** Incoming crews are sanitised field by field on this end too, then clash-resolved locally. */
+  private onlineDesigns(state: NetworkState): [TeamDesign, TeamDesign] {
+    return resolveKits(sanitizeTeam(state.teams[0], 0), sanitizeTeam(state.teams[1], 1))
   }
 
   private onOnlineStatus(state: LinkState, detail?: string): void {
     const status = this.ui?.root.querySelector<HTMLElement>('[data-online-status]')
-    if (status) status.textContent = detail ?? ({ discovering: 'Finding the CAPBALL game server…', connecting: 'Joining the room…', open: 'Connected — warming up the pitch…', retrying: 'Reconnecting to the room…', unavailable: 'Online is not configured in this build yet.', closed: 'Room connection closed.', idle: '' }[state])
-    if (this.ui?.root.dataset.current === 'hud' && (state === 'retrying' || state === 'unavailable' || state === 'closed')) this.ui.caption(detail ?? 'Room connection lost.', 5000)
+    if (status) status.textContent = detail ?? ({ discovering: 'Finding the CAPBALL game server…', connecting: 'Joining the room…', open: 'Connected — warming up the pitch…', retrying: 'Reconnecting to the room…', unavailable: ONLINE_NOT_CONFIGURED, closed: 'Room connection closed.', idle: '' }[state])
+    if (state === 'retrying' || state === 'unavailable' || state === 'closed') this.onlineSmoother.reset()
+    if (this.ui?.root.dataset.current !== 'hud' || this.mode !== 'online') return
+    if (state === 'discovering' || state === 'connecting') this.ui.showOnlineWait(this.onlineClient?.room || null, 'Joining the room…')
+    else if (state === 'retrying') this.ui.showOnlineWait(this.onlineClient?.room || this.onlineState?.room || null, 'Connection dropped — reconnecting. The room is held for you.')
+    else if (state === 'unavailable' || state === 'closed') this.ui.showOnlineWait(this.onlineClient?.room || null, 'Room connection closed. Leave the match to start again.')
+    if (state === 'unavailable' || state === 'closed') this.ui.caption(detail ?? 'Room connection lost.', 5000)
   }
 
   private onOnlineMessage(message: ServerMessage): void {
     if (message.type === 'welcome') {
+      const profile = getOnlineProfile(message.state.profile.id, message.state.profile.version)
       this.mode = 'online'
+      if (!profile) {
+        this.ui.caption('This room uses an online rules profile this build does not know. Refresh CAPBALL to update.', 9000)
+        return
+      }
       this.onlineTeam = message.role === 'p1' ? 0 : 1
-      this.startMatch(RULESETS.street, 'park', { online: true, teams: [defaultTeam(0), defaultTeam(1)] })
+      const designs = this.onlineDesigns(message.state)
+      this.startMatch(profile.ruleset, message.state.surface, { online: true, teams: designs })
       this.ui.setOnlinePauseMode(true)
-      this.ui.caption(`Room ${message.room} · you're ${message.role === 'p1' ? 'Gutter Kings' : 'Rooftop Rats'}. Share the invite link.`, 6000)
+      this.ui.caption(`Room ${message.room} · ${profile.name} on ${SURFACES[message.state.surface].name} · you're ${designs[this.onlineTeam].name}. Share the invite link.`, 7000)
       this.applyOnlineState(message.state)
       return
     }
     if (message.type === 'state') { this.applyOnlineState(message.state); return }
     if (message.type === 'flick') { this.applyOnlineFlick(message); return }
+    if (message.type === 'penalty-shot') { this.onOnlinePenaltyShot(message); return }
     if (message.type === 'event') {
       if (message.seq <= this.lastOnlineGoalSeq) return
       this.lastOnlineGoalSeq = message.seq
@@ -483,7 +578,11 @@ export class App {
       else if (message.kind === 'win') this.onWin(message.team, message.score, 'target')
       return
     }
-    if (message.type === 'error') this.ui.caption(message.message, 4000)
+    if (message.type === 'error') {
+      // A rejected prediction never happened on the server; snap rather than gracefully blending a lie.
+      if (message.code === 'wrong_turn' || message.code === 'invalid') this.onlineSmoother.reset()
+      this.ui.caption(message.message, 4000)
+    }
   }
 
   private applyOnlineState(state: NetworkState): void {
@@ -491,24 +590,191 @@ export class App {
     const previous = this.onlineState
     this.onlineState = state
     const m = this.match
+    const designs = this.onlineDesigns(state)
+    if (JSON.stringify(designs) !== JSON.stringify(this.teams)) {
+      this.teams = designs
+      this.renderer.setDesigns(designs)
+      this.ui.setTeams(designs)
+    }
+    const flow = state.penalty
+    if (state.ready && state.phase !== 'waiting' && flow) {
+      // Freeze local bodies on the first penalty snapshot only, so a keeper drag or a
+      // staged shot is never overwritten by the server's neutral set-piece positions.
+      if (!this.hiddenPenalty || this.onlinePenaltyId !== flow.id) {
+        this.applyOnlineSnapshot(state, false)
+        m.paused = false
+        this.ui.setScore(state.score)
+        this.ui.setTurn(flow.kicker, this.teams, TURN_LABEL.penalty)
+        this.beginOnlinePenalty(flow)
+      } else {
+        this.syncOnlinePenalty(flow)
+      }
+      this.refreshMeters()
+      this.refreshActionButton()
+      this.ui.showOnlineWait(null)
+      return
+    }
+    if (this.onlinePenaltyId !== -1) this.endOnlinePenalty()
     if (state.ready && state.phase !== 'waiting') {
-      m.applyAuthoritativeState({
-        bodies: { caps: state.bodies.slice(0, 10), ball: state.bodies[10] },
-        phase: state.phase as Match['phase'], team: state.team, reason: state.reason as TurnReason,
-        turn: state.turn, flicks: state.flicks, score: [...state.score], possession: state.possession,
-        armed: state.armed, activeCap: state.activeCap,
-      })
+      // Blend only continuous play: a new phase, turn, reason or set-piece is a real
+      // event and must snap, or the renderer would smear a goal or a reset.
+      const smooth = !!previous && previous.ready && state.ready
+        && previous.phase === state.phase && previous.reason === state.reason && previous.turn === state.turn
+        && !previous.penalty && !state.penalty
+        && (state.phase === 'aim' || state.phase === 'moving' || state.phase === 'goal')
+      this.applyOnlineSnapshot(state, smooth)
       m.paused = false
       this.ui.setScore(state.score)
       this.ui.setTurn(state.phase === 'over' ? null : state.team, this.teams, TURN_LABEL[state.reason as TurnReason] ?? 'your flick')
       if (state.phase === 'aim' && (!previous || previous.phase !== state.phase || previous.team !== state.team || previous.turn !== state.turn || previous.reason !== state.reason)) this.onTurn(state.team, state.reason as TurnReason)
       this.refreshMeters()
       this.refreshActionButton()
+      this.ui.showOnlineWait(null)
     } else {
       m.paused = true
+      this.onlineSmoother.reset()
       this.ui.setTurn(null, this.teams, '')
       this.ui.caption(state.connected.some(Boolean) ? `Room ${state.room} · waiting for your mate…` : 'Room paused · reconnecting both players…', 7000)
+      this.ui.showOnlineWait(state.room, state.connected.some(Boolean) ? 'Waiting for your mate to join. Share the invite link or room code.' : 'Room paused while both players reconnect.')
     }
+  }
+
+  /**
+   * Apply the server's authoritative bodies. When `smooth` is true the visible gap is
+   * captured as a render-only residual; the physics world already holds the real state.
+   * A teleport (goal reset, respawn) exceeds the snap threshold and is not smeared.
+   */
+  private applyOnlineSnapshot(state: NetworkState, smooth: boolean): void {
+    const m = this.match
+    if (!m) return
+    const before: Pose[] = []
+    if (smooth) {
+      for (let id = 0; id < 11; id++) {
+        const body = id < 10 ? m.world.caps[id] : m.world.ball
+        before.push(this.onlineSmoother.apply(id, { x: body.position.x, y: body.position.y, angle: body.angle }))
+      }
+    } else {
+      this.onlineSmoother.reset()
+    }
+    m.applyAuthoritativeState({
+      bodies: { caps: state.bodies.slice(0, 10), ball: state.bodies[10] },
+      phase: state.phase as Match['phase'], team: state.team, reason: state.reason as TurnReason,
+      turn: state.turn, flicks: state.flicks, score: [...state.score], possession: state.possession,
+      armed: state.armed, activeCap: state.activeCap,
+    })
+    if (!smooth) return
+    let largest = 0
+    for (let id = 0; id < 11; id++) {
+      const next = state.bodies[id]
+      const was = before[id]
+      if (!next || !was) continue
+      const raw = Math.hypot(was.x - next.x, was.y - next.y)
+      if (raw > largest) largest = raw
+      this.onlineSmoother.correct(id, was, { x: next.x, y: next.y, angle: next.angle })
+    }
+    this.onlineClient?.diag.correction(largest)
+  }
+
+  private beginOnlinePenalty(flow: NetworkPenalty): void {
+    const keeperTeam = (1 - flow.kicker) as TeamIndex
+    const p = new HiddenPenalty(flow.kicker, keeperTeam, flow.takerId, flow.keeperId, flow.end, FOOTBALL.hiddenPenaltyPhaseMs)
+    if (this.onlineTeam === flow.kicker) p.stage = 'cover-shooter'
+    this.hiddenPenalty = p
+    this.onlinePenaltyId = flow.id
+    this.onlinePenaltyRole = this.onlineTeam === flow.kicker ? 'shot' : 'keeper'
+    this.onlinePenaltySeal = null
+    this.onlinePenaltyCommitted = this.onlineTeam !== null && flow.committed[this.onlineTeam]
+    this.onlinePenaltyRevealSent = false
+    this.onlinePenaltyStage = flow.stage
+    this.penaltyTimerSecond = -1
+    this.keeperInput.cancel()
+    if (this.onlinePenaltyCommitted) {
+      p.stage = 'done'
+      this.ui.caption('Your choice is already locked in. Waiting for the reveal…', 4500)
+    } else {
+      this.showPenaltyCover()
+    }
+    this.refreshActionButton()
+    this.syncOnlinePenalty(flow)
+  }
+
+  private syncOnlinePenalty(flow: NetworkPenalty): void {
+    if (this.onlinePenaltyId !== flow.id) return
+    this.onlinePenaltyStage = flow.stage
+    if (flow.stage === 'reveal' && !this.onlinePenaltyRevealSent) {
+      this.onlinePenaltyRevealSent = true
+      if (this.onlinePenaltySeal) void this.sendOnlinePenaltyReveal()
+      else this.ui.caption('Both choices are locked. The server is settling the penalty…', 4000)
+    }
+  }
+
+  private async sendOnlinePenaltyCommit(): Promise<void> {
+    const p = this.hiddenPenalty
+    const flow = this.onlineState?.penalty
+    const team = this.onlineTeam
+    if (!p || !flow || team === null || this.onlinePenaltyId !== flow.id || this.onlinePenaltySeal) return
+    let choice: PenaltyChoice | null = null
+    if (this.onlinePenaltyRole === 'keeper' && p.keeperPosition) {
+      choice = { kind: 'keeper', position: { ...p.keeperPosition } }
+    } else if (this.onlinePenaltyRole === 'shot' && p.committedShot) {
+      choice = { kind: 'shot', direction: { ...p.committedShot.direction }, power: p.committedShot.power, forfeited: p.forfeited }
+    }
+    if (!choice) return
+    const nonce = randomNonce(16)
+    const commit = await sha256Hex(penaltyCommitText(flow.id, team, choice, nonce))
+    if (this.hiddenPenalty !== p || this.onlineState?.penalty?.id !== flow.id || this.onlinePenaltyCommitted) return
+    if (this.onlineClient?.sendPenaltyCommit(flow.id, commit) === null) {
+      this.ui.caption('Choice held while reconnecting — it will send when the room is back.', 4500)
+      return
+    }
+    this.onlinePenaltySeal = { choice, nonce, commit }
+    this.onlinePenaltyCommitted = true
+    this.refreshActionButton()
+  }
+
+  private async sendOnlinePenaltyReveal(): Promise<void> {
+    const seal = this.onlinePenaltySeal
+    const flow = this.onlineState?.penalty
+    if (!seal || !flow || this.onlinePenaltyId !== flow.id) return
+    if (this.onlineClient?.sendPenaltyReveal(flow.id, seal.choice, seal.nonce) === null) {
+      this.onlinePenaltyRevealSent = false
+      this.ui.caption('Reveal held while reconnecting — it will send when the room is back.', 4500)
+    }
+  }
+
+  private onOnlinePenaltyShot(message: PenaltyShotMessage): void {
+    if (message.penaltyId !== this.onlinePenaltyId) return
+    const m = this.match
+    const keeper = message.keeper
+    const keeperSide = keeper.y < PITCH.height / 2 - 8 ? 'upper side' : keeper.y > PITCH.height / 2 + 8 ? 'lower side' : 'centre'
+    const dir = message.shot.direction
+    const shotSide = dir.y < -0.2 ? 'upper side' : dir.y > 0.2 ? 'lower side' : 'straight'
+    if (m) m.world.place(m.world.caps[message.keeperId], keeper, 0)
+    this.keeperInput.cancel()
+    this.endOnlinePenalty()
+    if (m) {
+      m.paused = false
+      m.tryFlick(message.takerId, dir, message.shot.power, 0)
+    }
+    this.ui.caption(message.shot.forfeited
+      ? `Keeper committed ${keeperSide}. Shot conceded — the server takes it from here.`
+      : `Keeper: ${keeperSide}. Shot: ${shotSide}. The server settles the bounce.`, 4000)
+  }
+
+  private endOnlinePenalty(): void {
+    this.hiddenPenalty?.finish()
+    this.hiddenPenalty = null
+    this.onlinePenaltyId = -1
+    this.onlinePenaltyRole = null
+    this.onlinePenaltySeal = null
+    this.onlinePenaltyCommitted = false
+    this.onlinePenaltyRevealSent = false
+    this.onlinePenaltyStage = null
+    this.keeperInput.cancel()
+    this.penaltyTimerSecond = -1
+    this.ui.setPenaltyTimer(null)
+    const open = this.ui.root.querySelector<HTMLElement>('.modal.is-active')?.dataset.modal
+    if (open === 'penalty-cover' || open === 'penalty-reveal') this.ui.modal(null)
   }
 
   private applyOnlineFlick(message: FlickMessage): void {
@@ -522,7 +788,7 @@ export class App {
   private commitFlick(id: number, dir: Vec, power: number, spin: number): void {
     const m = this.match
     if (!m) return
-    if (this.mode !== 'online' && this.hiddenPenalty?.stage === 'shooter' && id === this.hiddenPenalty.takerId) {
+    if ((this.mode !== 'online' || this.onlinePenaltyId !== -1) && this.hiddenPenalty?.stage === 'shooter' && id === this.hiddenPenalty.takerId) {
       if (this.hiddenPenalty.stageShot({ direction: dir, power })) {
         this.ui.restartBanner('Shot staged · lock it to reveal', this.teams[this.hiddenPenalty.kicker].primary)
         this.refreshActionButton()
@@ -547,14 +813,20 @@ export class App {
   // ---------------------------------------------------------------- screens
   private openSetup(): void {
     const m = this.mode
+    const tournamentAi = this.settings.tournamentAi
     this.ui.html('[data-setup]', setupHtml({
       title: m === 'quick' ? 'Quick match' : m === 'ai' ? 'CAPBALL vs the machine' : m === 'shootout' ? 'Penalty shootout' : 'Street tournament',
       sub: m === 'quick' ? 'Pass the phone, take turns, talk trash.'
         : m === 'ai' ? 'One human. One mouthy computer. Pick its street cred.'
           : m === 'shootout' ? 'Five kicks each, then sudden death. Every cap takes one — even the keeper.'
-          : 'Four crews, two semis, one final. Draws go to penalties.',
+            : tournamentAi ? 'Your crew against three street rivals. Win three ties, lift the cup.'
+              : 'Four crews, two semis, one final. Draws go to penalties.',
       presetId: this.settings.ruleset, overrides: this.settings.flags, surface: this.surface, showRules: m !== 'shootout',
-      showAi: m === 'ai', aiLevel: this.settings.aiLevel,
+      showAi: m === 'ai' || (m === 'tournament' && tournamentAi),
+      aiLabel: m === 'tournament' ? 'Pick the rival difficulty' : 'Pick your opponent',
+      aiLevel: this.settings.aiLevel,
+      showTournament: m === 'tournament',
+      tournamentAi,
       penaltyTimeout: this.settings.penaltyTimeout, allowHiddenPenalties: m === 'quick' || m === 'tournament',
       goLabel: m === 'tournament' ? 'Draw the bracket' : m === 'ai' ? 'Take on the AI' : 'Kick off',
     }))
@@ -590,8 +862,7 @@ export class App {
     else this.toMenu()
   }
 
-  private renderBracket(): void {
-    const tour = this.tournament!
+  private bracketMarkup(tour: Tournament, highlight: Tie | null): string {
     const crew = (i: number | null) => (i === null ? null : tour.crews[i])
     const row = (t: Tie, side: 'home' | 'away') => {
       const idx = t[side]
@@ -601,25 +872,79 @@ export class App {
       const win = t.result && t.result.winner === idx
       return `<div class="row ${win ? 'win' : ''}"><span>${c ? `<span class="dot" style="background:${c.primary}"></span>${esc(c.name)}` : '<em>TBC</em>'}</span><span>${g}${so}</span></div>`
     }
+    const tie = (t: Tie, cls = '') => `<div class="tie ${cls} ${highlight === t ? 'next' : ''}"><small>${t.label}${t.result?.simulated ? ' · AI result' : ''}</small>${row(t, 'home')}${row(t, 'away')}</div>`
+    return `<div class="bracket">${tie(tour.ties[0])}${tie(tour.ties[1])}${tie(tour.ties[2], 'final')}</div>`
+  }
+
+  private renderBracket(): void {
+    const tour = this.tournament!
     const next = tour.next
-    const tie = (t: Tie, cls = '') => `<div class="tie ${cls} ${next === t ? 'next' : ''}"><small>${t.label}</small>${row(t, 'home')}${row(t, 'away')}</div>`
     const champ = tour.champion
+    const aiTag = this.aiTournament ? ` · ${AI.levels[this.settings.aiLevel].name} AI` : ''
+    const opponent = this.aiTournament && next ? tour.crews[next.home === 0 ? next.away! : next.home!] : null
+    const sub = champ !== null
+      ? `${esc(tour.crews[champ].name)} rule the streets.`
+      : next ? `Up next: ${next.label}${opponent ? ` — you vs ${esc(opponent.name)}` : ''}${aiTag}`
+        : ''
     this.ui.html('[data-bracket]', `
       <div class="tape tape-b"></div>
       <h2>${champ !== null ? 'Champions!' : 'The bracket'}</h2>
-      <p class="sub">${champ !== null ? `${esc(tour.crews[champ].name)} rule the streets.` : next ? `Up next: ${next.label}` : ''}</p>
-      <div class="bracket">${tie(tour.ties[0])}${tie(tour.ties[1])}${tie(tour.ties[2], 'final')}</div>
+      <p class="sub" data-bracket-ai="${this.aiTournament ? this.settings.aiLevel : ''}">${sub}</p>
+      ${this.bracketMarkup(tour, next)}
       <div class="setup-actions">
-        ${champ === null && next ? `<button class="btn" data-action="playtie">Play ${next.label}</button>` : '<button class="btn" data-action="mode:tournament">New tournament</button>'}
+        ${champ !== null
+          ? `<button class="btn" data-action="cup">View the cup</button><button class="btn ghost small" data-action="mode:tournament">New tournament</button>`
+          : next ? `<button class="btn" data-action="playtie">Play ${next.label}</button>` : ''}
         <button class="chip" data-action="back">Menu</button>
       </div>`)
     this.ui.show('bracket')
+  }
+
+  private renderCup(): void {
+    const tour = this.tournament
+    if (!tour || tour.champion === null) { this.renderBracket(); return }
+    const champ = tour.crews[tour.champion]
+    const final = tour.ties[2].result!
+    const home = tour.crews[final.home!]
+    const away = tour.crews[final.away!]
+    const pens = final.shootout ? ` <small>(${final.shootout[0]}–${final.shootout[1]} pens)</small>` : ''
+    const eliminated = this.aiTournament && tour.champion !== 0
+    const sub = eliminated
+      ? 'The street machine takes the cup. Your run ends here — but the scoreboard never lies.'
+      : this.aiTournament ? 'Your crew rule the streets. Three ties, one cup.' : 'Two crews, one cup, no mercy.'
+    const simulated = tour.ties.some(t => t.result?.simulated)
+    this.ui.html('[data-cup]', `
+      <div class="tape tape-a"></div>
+      <p class="cup-kicker">Street tournament · ${this.aiTournament ? `${esc(AI.levels[this.settings.aiLevel].name)} AI` : 'Local 2P'}</p>
+      <div class="cup-trophy" aria-hidden="true">${CUP_TROPHY_SVG}</div>
+      <h2 class="cup-champ" style="--champ:${champ.primary}">${esc(champ.name)}</h2>
+      <p class="cup-sub">${sub}</p>
+      <div class="cup-final" aria-label="Cup final score">
+        <div class="cup-final-side" style="--team:${home.primary}"><span class="dot"></span><span>${esc(home.name)}</span><strong>${final.goals[0]}${pens}</strong></div>
+        <span class="cup-final-divider" aria-hidden="true">–</span>
+        <div class="cup-final-side" style="--team:${away.primary}"><span class="dot"></span><span>${esc(away.name)}</span><strong>${final.goals[1]}</strong></div>
+      </div>
+      <p class="cup-final-label">Cup final${final.simulated ? ' · settled by the street AI' : ''}</p>
+      <div class="cup-crew" aria-label="${esc(champ.name)} starting caps">
+        ${[0, 1, 2, 3, 4].map(slot => `<canvas data-preview="0:${slot}" width="108" height="108"></canvas>`).join('')}
+      </div>
+      <h3 class="cup-road">The road to the cup</h3>
+      ${this.bracketMarkup(tour, null)}
+      ${simulated ? '<p class="cup-note">Rival-vs-rival ties were settled by the deterministic street AI.</p>' : ''}
+      <div class="setup-actions cup-actions">
+        <button class="btn" data-action="mode:tournament">New tournament</button>
+        <button class="btn ghost" data-action="back">Menu</button>
+      </div>`)
+    this.ui.show('cup')
+    drawPreviews(this.ui.$('[data-cup]'), [champ, champ])
   }
 
   // ---------------------------------------------------------------- match lifecycle
   startMatch(rules: Ruleset, surface: SurfaceId, opts: { live?: boolean; shootout?: boolean; teams?: [TeamDesign, TeamDesign]; vsAi?: boolean; online?: boolean } = {}): void {
     const live = opts.live ?? true
     this.endMatch()
+    this.onlineSmoother.reset()
+    this.onlineDiagMs = 0
     const m = new Match({ ruleset: rules, surface, shootout: opts.shootout ? { first: 0 } : undefined })
     this.match = m
     this.ruleset = rules
@@ -633,6 +958,7 @@ export class App {
     this.renderer.setDesigns(this.teams)
     this.ui.setTeams(this.teams)
     this.ui.setOnlinePauseMode(!!opts.online)
+    if (!opts.online) this.ui.setOnlineDiagnostics(null)
     this.ui.setTutorialPauseMode(this.mode === 'tutorial')
     this.ui.setScore([0, 0])
     this.ui.html('[data-rules-body]', rulesHtml(rules, surface, !!opts.shootout))
@@ -694,6 +1020,12 @@ export class App {
     this.penaltyRevealTimer = 0
     this.hiddenPenalty?.finish()
     this.hiddenPenalty = null
+    this.onlinePenaltyId = -1
+    this.onlinePenaltyRole = null
+    this.onlinePenaltySeal = null
+    this.onlinePenaltyCommitted = false
+    this.onlinePenaltyRevealSent = false
+    this.onlinePenaltyStage = null
     this.keeperInput.cancel()
     this.penaltyTimerSecond = -1
     this.ui.setPenaltyTimer(null)
@@ -817,12 +1149,14 @@ export class App {
       const so = m.shootout
       const kicker = so.kicker
       this.ui.banner(`${so.suddenDeath ? 'SUDDEN DEATH · ' : ''}KICK ${Math.floor((so.taken(0) + so.taken(1)) / 2) + 1}`, this.teams[kicker].primary, 1100)
-      this.ui.caption(`${this.teams[team].name}: drag your keeper along the line, then lock it. ${this.capName(m.takerId)} steps up.`, 3200)
+      this.ui.caption(this.aiBrain && team === 1
+        ? `${this.teams[team].name} keeper is picking a spot. ${this.capName(m.takerId)} steps up.`
+        : `${this.teams[team].name}: drag your keeper along the line, then lock it. ${this.capName(m.takerId)} steps up.`, 3200)
     }
     this.refreshMeters()
     this.refreshActionButton()
     if (reason === 'penalty' && m?.ruleset.hiddenPenalties && (this.mode === 'quick' || this.mode === 'tournament')) this.beginHiddenPenalty(team)
-    if (this.mode === 'ai' && team === 1 && this.live) this.scheduleAi(m)
+    if (this.aiBrain && team === 1 && this.live) this.scheduleAi(m)
     else this.cancelAi()
     const shootout = reason === 'keeper' && !!m?.shootout
     this.showFirstRuleHint(shootout ? 'penalty' : reason, shootout ? m!.shootout!.kicker : team, callOut, shootout)
@@ -835,6 +1169,17 @@ export class App {
     const keeperTeam = (1 - kicker) as TeamIndex
     this.hiddenPenalty = new HiddenPenalty(kicker, keeperTeam, m.takerId, m.keeperId, keeperTeam as 0 | 1, FOOTBALL.hiddenPenaltyPhaseMs)
     this.penaltyTimerSecond = -1
+    this.penaltyAiMs = 0
+    // The AI keeper never gets a "pass the phone" card: pick a legal spot, hide it, and
+    // hand the phone straight to the human shooter.
+    if (this.aiBrain && keeperTeam === 1) {
+      const p = this.hiddenPenalty
+      p.dismissCover()
+      const radius = m.world.capInfo(p.keeperId).type.radius
+      const line = p.end === 1 ? PITCH.width : 0
+      p.lockKeeper(legalKeeperPosition({ x: line, y: this.aiBrain.keeperGuess() }, p.end, radius, m.ruleset.keeperMayLeaveLine))
+      this.placeKeeperNeutral(p)
+    }
     this.showPenaltyCover()
     this.refreshActionButton()
   }
@@ -842,16 +1187,21 @@ export class App {
   private showPenaltyCover(): void {
     const p = this.hiddenPenalty
     if (!p) return
+    const online = this.mode === 'online'
     if (p.stage === 'cover-keeper') {
       this.ui.showPenaltyCover(
         `${this.teams[p.keeperTeam].name}: choose the keeper spot`,
-        `Pass the phone to the keeper's player. Set the keeper, then tap Lock Keeper. The shooter cannot see the locked spot.`,
+        online
+          ? `Set your keeper, then tap Lock Keeper. Your mate cannot see your locked spot until the server reveals both choices.`
+          : `Pass the phone to the keeper's player. Set the keeper, then tap Lock Keeper. The shooter cannot see the locked spot.`,
         'Keeper is ready', this.teams[p.keeperTeam].primary,
       )
     } else if (p.stage === 'cover-shooter') {
       this.ui.showPenaltyCover(
         `${this.teams[p.kicker].name}: take the shot`,
-        `Keeper choice is locked and hidden. Pass the phone to the shooter, then stage one flick and tap Lock Shot.`,
+        online
+          ? `The keeper choice is locked and hidden. Stage one flick, then tap Lock Shot. The server reveals both choices together.`
+          : `Keeper choice is locked and hidden. Pass the phone to the shooter, then stage one flick and tap Lock Shot.`,
         'Shooter is ready', this.teams[p.kicker].primary,
       )
     }
@@ -909,10 +1259,28 @@ export class App {
     const radius = m.world.capInfo(p.keeperId).type.radius
     const choice = legalKeeperPosition({ x: body.position.x, y: body.position.y }, p.end, radius, m.ruleset.keeperMayLeaveLine)
     if (!p.lockKeeper(choice)) return
-    // Hide the committed position from the shooter until their own shot is locked.
-    this.placeKeeperNeutral(p)
     this.keeperInput.cancel()
     this.penaltyTimerSecond = -1
+    if (this.mode === 'online') {
+      // The keeper keeps their own spot on their own screen; only the server sees the choice.
+      this.ui.modal(null)
+      this.ui.caption('Keeper locked · hidden from your mate until the shot is locked.', 4500)
+      this.refreshActionButton()
+      void this.sendOnlinePenaltyCommit()
+      return
+    }
+    // Hide the committed position from the shooter until their own shot is locked.
+    this.placeKeeperNeutral(p)
+    if (this.aiBrain && p.kicker === 1) {
+      // The AI taker does not need a pass-the-phone card; skip straight to its shot.
+      p.dismissCover()
+      this.ui.modal(null)
+      this.penaltyAiMs = 900
+      this.ui.setTurn(p.kicker, this.teams, 'AI taker steps up')
+      this.ui.caption(`${this.teams[p.kicker].name} taker is choosing a corner…`, 1200)
+      this.refreshActionButton()
+      return
+    }
     this.showPenaltyCover()
     this.refreshActionButton()
   }
@@ -920,10 +1288,28 @@ export class App {
   private lockPenaltyShot(): void {
     const p = this.hiddenPenalty
     if (!p || !p.lockShot()) return
+    if (this.mode === 'online') {
+      this.ui.modal(null)
+      this.ui.caption('Shot locked · waiting for the keeper reveal…', 4500)
+      this.refreshActionButton()
+      void this.sendOnlinePenaltyCommit()
+      return
+    }
     this.revealPenalty()
   }
 
   private forfeitPenalty(): void {
+    const p = this.hiddenPenalty
+    if (this.mode === 'online' && p && p.stage === 'shooter') {
+      if (!p.stageShot({ direction: { x: p.end === 0 ? 1 : -1, y: 0 }, power: FOOTBALL.forfeitPower })) return
+      if (!p.lockShot()) return
+      p.forfeited = true
+      this.ui.modal(null)
+      this.ui.caption('Kick conceded · waiting for the keeper reveal…', 4500)
+      this.refreshActionButton()
+      void this.sendOnlinePenaltyCommit()
+      return
+    }
     if (this.hiddenPenalty?.forfeit()) this.revealPenalty()
   }
 
@@ -934,6 +1320,27 @@ export class App {
   private advanceHiddenPenalty(dtMs: number): void {
     const p = this.hiddenPenalty
     if (!p) return
+    if (this.mode === 'online') {
+      // The server owns the deadline and defaults; the client only renders the countdown.
+      const flow = this.onlineState?.penalty
+      if (!flow || this.onlinePenaltyId !== flow.id) return
+      if (p.stage === 'keeper' || p.stage === 'shooter') {
+        const seconds = Math.max(0, Math.ceil((flow.deadline - Date.now()) / 1000))
+        if (seconds !== this.penaltyTimerSecond) {
+          this.penaltyTimerSecond = seconds
+          this.ui.setPenaltyTimer(seconds)
+        }
+      }
+      return
+    }
+    // An AI taker picks its own corner after the human keeper has committed.
+    if (this.aiBrain && p.kicker === 1 && p.stage === 'shooter') {
+      this.penaltyAiMs = Math.max(0, this.penaltyAiMs - dtMs)
+      if (this.penaltyAiMs > 0) return
+      const choice = this.aiBrain.penaltyShot(p.end)
+      if (p.stageShot(choice) && p.lockShot()) this.revealPenalty()
+      return
+    }
     if (p.stage === 'keeper' || p.stage === 'shooter') {
       const seconds = Math.max(0, Math.ceil((p.timeoutMs - p.elapsedMs) / 1000))
       if (seconds !== this.penaltyTimerSecond) {
@@ -955,6 +1362,14 @@ export class App {
     this.placeKeeperNeutral(p)
     this.keeperInput.cancel()
     this.penaltyTimerSecond = -1
+    if (this.aiBrain && p.kicker === 1) {
+      p.dismissCover()
+      this.ui.modal(null)
+      this.penaltyAiMs = 900
+      this.ui.setTurn(p.kicker, this.teams, 'AI taker steps up')
+      this.refreshActionButton()
+      return
+    }
     this.showPenaltyCover()
     this.refreshActionButton()
   }
@@ -1164,13 +1579,22 @@ export class App {
         else this.tournament!.record(tie.id, goals, team)
         this.pendingTie = null
         this.currentTie = null
-        if (this.tournament!.champion !== null) title = `${d[team].name} are champions!`
-        actions = '<button class="btn" data-action="bracket">Continue</button>'
+        this.simulateAiOnlyTies()
+        const champion = this.tournament!.champion
+        if (champion !== null) {
+          const eliminated = this.aiTournament && champion !== 0
+          title = eliminated ? 'Your run ends here' : `${d[team].name} are champions!`
+          actions = `<button class="btn" data-action="cup">${eliminated ? 'See who lifts the cup' : 'Lift the cup'}</button>`
+        } else {
+          actions = '<button class="btn" data-action="bracket">Continue</button>'
+        }
       }
     }
     const stats = this.matchStatistics.snapshot()
     const modeLabels: Record<Mode, string> = {
-      quick: 'Quick Match', ai: 'Street match vs AI', shootout: 'Penalty Shootout', tournament: 'Street Tournament', online: 'Online Match', tutorial: 'Guided tutorial',
+      quick: 'Quick Match', ai: 'Street match vs AI', shootout: 'Penalty Shootout',
+      tournament: this.mode === 'tournament' && this.aiTournament ? 'Street Tournament · Versus AI' : 'Street Tournament',
+      online: 'Online Match', tutorial: 'Guided tutorial',
     }
     this.summaryActions = actions
     this.matchSummary = {
@@ -1274,15 +1698,25 @@ export class App {
     const m = this.match
     if (!m || !this.live) { this.ui.html('[data-powerbtn]', ''); return }
     if (this.hiddenPenalty?.stage === 'keeper') {
+      if (this.aiSetPieceTurn()) { this.ui.html('[data-powerbtn]', '<button class="powerbtn" disabled>AI KEEPER PICKING</button>'); return }
       this.ui.html('[data-powerbtn]', '<button class="powerbtn" data-action="keeper-lock">LOCK KEEPER</button>')
       return
     }
     if (this.hiddenPenalty?.stage === 'shooter') {
+      if (this.aiSetPieceTurn()) { this.ui.html('[data-powerbtn]', '<button class="powerbtn" disabled>AI TAKER STEPPING UP</button>'); return }
       const ready = !!this.hiddenPenalty.candidateShot
       this.ui.html('[data-powerbtn]', `<div class="penalty-lock-actions"><button class="powerbtn" data-action="shot-lock" ${ready ? '' : 'disabled'}>LOCK SHOT</button><button class="powerbtn penalty-concede" data-action="penalty-concede">CONCEDE</button></div>`)
       return
     }
+    if (this.mode === 'online' && this.onlinePenaltyId !== -1) {
+      const label = this.onlinePenaltyCommitted
+        ? (this.onlinePenaltyStage === 'reveal' ? 'LOCKED · REVEALING' : 'LOCKED · WAITING FOR MATE')
+        : 'WAITING FOR THE REVEAL'
+      this.ui.html('[data-powerbtn]', `<button class="powerbtn" disabled>${label}</button>`)
+      return
+    }
     if (m.keeperSetting) {
+      if (this.aiSetPieceTurn()) { this.ui.html('[data-powerbtn]', '<button class="powerbtn" disabled>AI KEEPER PICKING</button>'); return }
       this.ui.html('[data-powerbtn]', '<button class="powerbtn" data-action="keeperready">LOCK KEEPER</button>')
       return
     }
@@ -1295,7 +1729,9 @@ export class App {
   refreshPowerButtonPublic(): void { this.refreshMeters(); this.refreshActionButton() }
 
   private isAiTurn(m: Match | null = this.match): boolean {
-    return !!m && this.mode === 'ai' && this.live && !!this.aiBrain && m.team === 1 && m.phase === 'aim' && !m.keeperSetting
+    // Any match with an AI brain (standalone or Versus-AI tournament) plays team 1.
+    // Hidden penalties are staged by their own flow, so the normal flick AI stays out.
+    return !!m && !!this.aiBrain && this.live && m.team === 1 && m.phase === 'aim' && !m.keeperSetting && !this.hiddenPenalty
   }
 
   private cancelAi(): void {
@@ -1303,6 +1739,7 @@ export class App {
     if (this.aiBusy || this.aiDecision || this.aiThinkMs > 0 || this.aiDragMs > 0) this.aim = null
     this.aiThinkMs = 0
     this.aiDragMs = 0
+    this.aiKeeperMs = 0
     this.aiBusy = false
     this.aiDecision = null
   }
@@ -1356,6 +1793,27 @@ export class App {
     if (!m.tryFlick(decision.capId, decision.dir, decision.power, decision.spin)) this.scheduleAi(m)
   }
 
+  /** Shootout: the AI keeper picks its spot and locks it without a human tap. */
+  private advanceAiKeeper(m: Match, dt: number): void {
+    if (!this.aiBrain || !m.keeperSetting || m.team !== 1) return
+    if (!this.live || m.paused || this.ui.modalOpen) return
+    if (this.aiKeeperMs === 0) {
+      m.slideKeeper(this.aiBrain.keeperGuess())
+      this.aiKeeperMs = AI.thinkMs + 250
+      this.ui.caption(`${this.teams[1].name} keeper is picking a spot…`, 1400)
+      return
+    }
+    this.aiKeeperMs = Math.max(0, this.aiKeeperMs - dt)
+    if (this.aiKeeperMs === 0) m.keeperReady()
+  }
+
+  /** The AI owns this keeper/shot choice; the human must not click or drag it. */
+  private aiSetPieceTurn(m: Match | null = this.match): boolean {
+    if (!m || !this.aiBrain) return false
+    if (m.keeperSetting) return m.team === 1
+    return !!this.hiddenPenalty && this.hiddenPenalty.stage === 'shooter' && this.hiddenPenalty.kicker === 1
+  }
+
   // ---------------------------------------------------------------- input
   private localRuleInputActive(): boolean {
     const m = this.match
@@ -1366,7 +1824,7 @@ export class App {
 
   private pickable() {
     const m = this.match
-    if (!m || !this.live || m.phase !== 'aim' || m.paused || this.ui.modalOpen || this.ui.root.dataset.current !== 'hud' || this.isAiTurn(m)) return []
+    if (!m || !this.live || m.phase !== 'aim' || m.paused || this.ui.modalOpen || this.ui.root.dataset.current !== 'hud' || this.isAiTurn(m) || this.aiSetPieceTurn(m)) return []
     if (this.hiddenPenalty && this.hiddenPenalty.stage !== 'shooter') return []
     if (this.mode === 'online' && (!this.onlineState?.ready || this.onlineClient?.state !== 'open' || this.onlineTeam !== m.team)) return []
     return m.world.caps
@@ -1379,7 +1837,7 @@ export class App {
     const m = this.match
     if (m?.keeperSetting) {
       // Shootout keeper: dragging slides it along the goal line instead of aiming.
-      if (a) m.slideKeeper(a.pointer.y)
+      if (a && !this.aiSetPieceTurn(m)) m.slideKeeper(a.pointer.y)
       this.aim = null
       this.ui.setAimPower(null)
       return
@@ -1430,6 +1888,11 @@ export class App {
         saveSettings(this.settings)
         this.openSetup()
         break
+      case 'tournament-ai':
+        this.settings.tournamentAi = arg === 'yes'
+        saveSettings(this.settings)
+        this.openSetup()
+        break
       case 'preset':
         this.settings.ruleset = arg
         this.settings.flags = {}
@@ -1446,7 +1909,8 @@ export class App {
         saveSettings(this.settings)
         this.renderer.setSurface(this.surface)
         this.match?.world.setSurface(this.surface)
-        this.openSetup()
+        if (this.ui.root.dataset.current === 'online') this.openOnline()
+        else this.openSetup()
         break
       case 'input':
         if (arg.startsWith('flag:')) {
@@ -1481,18 +1945,22 @@ export class App {
           this.voice.enabled = this.settings.speech
           if (!this.settings.speech) this.voice.stop()
         } else if (arg === 'sound') this.setSound(!this.settings.sound)
+        else if (arg === 'dark') { this.settings.dark = !this.settings.dark; this.applyTheme() }
         else if (arg === 'tuning' && this.debugToolsEnabled) this.setTuning(!this.settings.tuning)
         this.syncSettingsPanel()
         saveSettings(this.settings)
         break
       case 'tune': this.tune.toggle(); break
       case 'arm': this.match?.toggleArm(); this.refreshActionButton(); break
-      case 'keeperready': this.match?.keeperReady(); break
+      case 'keeperready':
+        // The AI sets its own shootout keeper; a human tap must not lock that choice.
+        if (!this.aiBrain || this.match?.team === 0) this.match?.keeperReady()
+        break
       case 'penalty-cover': this.dismissPenaltyCover(); break
       case 'keeper-lock': this.lockPenaltyKeeper(); break
       case 'shot-lock': this.lockPenaltyShot(); break
       case 'penalty-concede': this.forfeitPenalty(); break
-      case 'pause': if (this.match && this.match.phase !== 'over') { this.ui.modal('pause'); this.syncTutorialCoach() }; break
+      case 'pause': if (this.match && this.match.phase !== 'over') { this.ui.modal('pause'); if (this.mode === 'online') this.ui.setOnlineDiagnostics(this.onlineClient?.diagnostics() ?? null); this.syncTutorialCoach() }; break
       case 'resume': this.ui.modal(null); this.syncTutorialCoach(); break
       case 'concede-match':
         if (this.mode === 'tutorial') break
@@ -1508,6 +1976,7 @@ export class App {
       case 'playtie': this.playTie(); break
       case 'tie-shootout': this.tieShootout(); break
       case 'bracket': this.ui.modal(null); this.renderBracket(); break
+      case 'cup': this.ui.modal(null); this.renderCup(); break
       case 'restart':
         if (!this.match) return
         if (this.mode === 'online') { this.ui.caption('Leave this room to start a new match.', 2500); break }
@@ -1585,9 +2054,19 @@ export class App {
     this.ui.setSettingSwitch('commentary', this.settings.commentary)
     this.ui.setSettingSwitch('speech', this.settings.speech)
     this.ui.setSettingSwitch('sound', this.settings.sound)
+    this.ui.setSettingSwitch('dark', this.settings.dark)
     this.ui.setSettingSwitch('tuning', this.settings.tuning && this.debugToolsEnabled)
     this.ui.setSettingAvailable('speech', this.voice.available, 'Voice is unavailable in this browser.')
     this.ui.$('[data-setting-row="tuning"]').hidden = !this.debugToolsEnabled
+  }
+
+  /** Theme is one switch: CSS tokens for the chrome, a darker canvas for the pitch. */
+  private applyTheme(): void {
+    const dark = this.settings.dark
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    this.renderer.setDark(dark)
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    if (meta) meta.content = dark ? '#0c0b0e' : '#18171b'
   }
 
   private go(): void {
@@ -1596,8 +2075,32 @@ export class App {
     else if (this.mode === 'ai') this.startMatch(rules, this.surface, { vsAi: true })
     else if (this.mode === 'shootout') this.startMatch(rules, this.surface, { shootout: true })
     else if (this.mode === 'tournament') {
-      this.tournament = new Tournament([this.settings.teams[0], this.settings.teams[1], ...RIVAL_CREWS])
+      this.aiTournament = this.settings.tournamentAi
+      this.tournamentSeed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0
+      this.tournamentRules = rules
+      this.tournament = new Tournament(this.aiTournament
+        ? [this.settings.teams[0], ...AI_RIVAL_CREWS]
+        : [this.settings.teams[0], this.settings.teams[1], ...RIVAL_CREWS])
+      this.simulateAiOnlyTies()
       this.renderBracket()
+    }
+  }
+
+  /** Resolve every ready fixture that does not involve the human's crew (crew 0). */
+  private simulateAiOnlyTies(): void {
+    const tour = this.tournament
+    const rules = this.tournamentRules
+    if (!this.aiTournament || !tour || !rules) return
+    for (let pass = 0; pass < 3; pass++) {
+      let changed = false
+      for (const tie of tour.ties) {
+        if (tie.result || tie.home === null || tie.away === null) continue
+        if (tie.home === 0 || tie.away === 0) continue
+        const sim = simulateAiTie(this.tournamentSeed, tie.id, tour.crews[tie.home], tour.crews[tie.away], rules)
+        tour.record(tie.id, sim.goals, sim.winnerSide, sim.shootout, true)
+        changed = true
+      }
+      if (!changed) break
     }
   }
 
@@ -1618,7 +2121,7 @@ export class App {
     this.currentTie = tie
     this.pendingTie = null
     const teams = resolveKits(tour.crews[tie.home], tour.crews[tie.away])
-    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { teams })
+    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { teams, vsAi: this.aiTournament })
     this.ui.banner(tie.label.toUpperCase(), '#151515', 1300)
   }
 
@@ -1628,7 +2131,7 @@ export class App {
     if (!tour || !pend || pend.tie.home === null || pend.tie.away === null) return
     this.currentTie = pend.tie
     const teams = resolveKits(tour.crews[pend.tie.home], tour.crews[pend.tie.away])
-    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { shootout: true, teams })
+    this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { shootout: true, teams, vsAi: this.aiTournament })
   }
 
   private toMenu(): void {
@@ -1637,6 +2140,8 @@ export class App {
     this.onlineTeam = null
     this.pendingOnlineActions.clear()
     this.ui.setOnlinePauseMode(false)
+    this.ui.setOnlineDiagnostics(null)
+    this.onlineSmoother.reset()
     this.ui.modal(null)
     this.ui.html('[data-win-actions]', '<button class="btn" data-action="restart">Rematch</button><button class="btn ghost" data-action="newmatch">New match</button>')
     this.startMatch(buildRuleset(this.settings.ruleset, this.settings.flags, this.settings.penaltyTimeout), this.surface, { live: false })
@@ -1653,6 +2158,15 @@ export class App {
       m.paused = this.live && ((this.ui.modalOpen && m.phase !== 'over')
         || (this.mode === 'online' && (!this.onlineState?.ready || this.onlineClient?.state !== 'open')))
       if (!m.paused) this.tick(m, dt)
+      if (this.mode === 'online') {
+        // Render-only: settle visual corrections, and refresh the pause-sheet readout twice a second.
+        this.onlineSmoother.advance(dt)
+        this.onlineDiagMs += dt
+        if (this.onlineDiagMs >= 500) {
+          this.onlineDiagMs = 0
+          this.ui.setOnlineDiagnostics(this.onlineClient?.diagnostics() ?? null)
+        }
+      }
       if (m.ruleset.halves && !m.shootout) {
         const txt = `${m.half}H ${fmtClock(m.timeLeft ?? 0)}`
         if (txt !== this.clockText) { this.clockText = txt; this.ui.setClock(txt) }
@@ -1671,6 +2185,7 @@ export class App {
       if (this.replay.t >= this.replay.clip.duration) this.endReplay()
     } else {
       this.advanceHiddenPenalty(dt)
+      this.advanceAiKeeper(m, dt)
       this.advanceAi(m, dt)
       m.update(dt)
     }
@@ -1692,18 +2207,21 @@ export class App {
 
   private frameState(m: Match, t: number): FrameState {
     const rp = this.replay
+    const online = this.mode === 'online' && this.live && !rp
     const caps: CapView[] = m.world.caps.map((b, id) => {
       const info = m.world.capInfo(id)
       const p = rp ? rp.clip.pose(rp.t, id) : { x: b.position.x, y: b.position.y, angle: b.angle }
-      return { x: p.x, y: p.y, angle: p.angle, team: info.team, slot: info.slot, type: info.type.id, active: m.world.isActive(b) }
+      const pose = online ? this.onlineSmoother.apply(id, p) : p
+      return { x: pose.x, y: pose.y, angle: pose.angle, team: info.team, slot: info.slot, type: info.type.id, active: m.world.isActive(b) }
     })
-    const ball = rp ? rp.clip.pose(rp.t, m.world.caps.length) : { x: m.world.ball.position.x, y: m.world.ball.position.y, angle: m.world.ball.angle }
+    const rawBall = rp ? rp.clip.pose(rp.t, m.world.caps.length) : { x: m.world.ball.position.x, y: m.world.ball.position.y, angle: m.world.ball.angle }
+    const ball = online ? this.onlineSmoother.apply(m.world.caps.length, rawBall) : rawBall
     return {
       caps,
       ball,
       aim: this.aim,
-      pickTeam: this.live && m.phase === 'aim' && !m.paused && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') ? m.team : null,
-      pickable: this.live && m.phase === 'aim' ? (id: number) => !this.isAiTurn(m) && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') && m.canPick(id) : undefined,
+      pickTeam: this.live && m.phase === 'aim' && !m.paused && !this.aiSetPieceTurn(m) && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') ? m.team : null,
+      pickable: this.live && m.phase === 'aim' ? (id: number) => !this.isAiTurn(m) && !this.aiSetPieceTurn(m) && (!this.hiddenPenalty || this.hiddenPenalty.stage === 'shooter') && m.canPick(id) : undefined,
       powerShot: m.armed !== null && m.armed === m.team && m.phase === 'aim',
       activeCap: m.activeCap,
       replay: !!rp,
@@ -1714,6 +2232,20 @@ export class App {
   /** Live handler counts — used by the smoke test to prove nothing stacks up across matches. */
   debugCounts(): Record<string, number> {
     return { input: activeInputHandlers(), penaltyInput: activePenaltyInputHandlers(), matchListeners: this.match?.events.listenerCount() ?? 0, matchSubs: this.matchUnsubs.length, overlays: activeOverlays(), overlaySubs: this.tune.listenerCount }
+  }
+
+  /** Online responsiveness readout for the smoke test. Local measurements only, never player input. */
+  debugOnline(): Record<string, unknown> {
+    let residual = 0
+    for (let id = 0; id < 11; id++) residual = Math.max(residual, this.onlineSmoother.residualPx(id))
+    return {
+      ...(this.onlineClient?.diagnostics() ?? {}),
+      link: this.onlineClient?.state ?? 'idle',
+      ready: this.onlineState?.ready ?? false,
+      team: this.onlineTeam,
+      pendingPredictions: this.pendingOnlineActions.size,
+      smoother: { ...this.onlineSmoother.stats, residualPx: Math.round(residual * 10) / 10 },
+    }
   }
 
   destroy(): void {

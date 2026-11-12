@@ -275,4 +275,20 @@ export class AiBrain {
     const half = PITCH.goalWidth / 2 - CAP_TYPES.keeper.radius
     return H / 2 + Math.max(-1, Math.min(1, gauss(this.rng) * 0.45)) * half
   }
+
+  /**
+   * Hidden-penalty taker: pick a corner inside the goal mouth, never the keeper's line.
+   * `end` is the goal being attacked (0 = left, 1 = right); the direction is a normalised flick vector.
+   */
+  penaltyShot(end: 0 | 1): { direction: Vec; power: number } {
+    const spread = 0.2 + this.level.aimNoise * 6
+    const corner = this.rng() < 0.5 ? -1 : 1
+    const y = Math.max(-0.66, Math.min(0.66, corner * 0.34 + gauss(this.rng) * spread))
+    const x = end === 1 ? 1 : -1
+    const length = Math.hypot(x, y)
+    return {
+      direction: { x: x / length, y: y / length },
+      power: Math.max(0.55, Math.min(1, 0.84 + gauss(this.rng) * this.level.powerNoise)),
+    }
+  }
 }

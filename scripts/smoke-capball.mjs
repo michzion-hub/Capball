@@ -3,20 +3,65 @@
 // fails on any console/page/network error, and writes screenshots to ./shots/.
 import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { chromium } from 'playwright'
+import { WebSocket, WebSocketServer } from 'ws'
 
-const port = 4300 + Math.floor(Math.random() * 500)
-const onlinePort = 48000 + Math.floor(Math.random() * 8000)
+/** Ask the OS for a port that is actually bindable right now (Windows excludes whole ranges for NAT). */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.unref()
+    probe.on('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+const port = await freePort()
+let onlinePort = await freePort()
+while (onlinePort === port) onlinePort = await freePort()
 const url = `http://127.0.0.1:${port}/`
 const onlineUrl = `ws://127.0.0.1:${onlinePort}/ws`
 const allowedOrigin = `http://127.0.0.1:${port}`
 const out = process.env.SHOTS_DIR ?? 'shots'
 mkdirSync(out, { recursive: true })
-const roomServer = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { stdio: 'ignore', env: { ...process.env, HOST: '127.0.0.1', PORT: String(onlinePort), CAPBALL_ALLOWED_ORIGINS: allowedOrigin } })
-const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', 'preview', '--port', String(port), '--strictPort', '--host', '127.0.0.1'], { stdio: 'ignore', env: { ...process.env, CAPBALL_WS_URL: onlineUrl } })
+let roomErr = ''
+let previewErr = ''
+const roomServer = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOST: '127.0.0.1', PORT: String(onlinePort), CAPBALL_ALLOWED_ORIGINS: allowedOrigin } })
+roomServer.stderr?.on('data', chunk => { roomErr = (roomErr + chunk).slice(-2000) })
+// Deterministic delay/jitter proxy between the browsers and the authoritative room server, so the
+// online flow is exercised under a non-localhost link. Server->client is delayed 25/70 ms in turn.
+const proxyPort = await freePort()
+const upstreams = new Set()
+let proxySeq = 0
+const proxy = new WebSocketServer({ host: '127.0.0.1', port: proxyPort, path: '/ws', perMessageDeflate: false })
+proxy.on('connection', client => {
+  const upstream = new WebSocket(onlineUrl, { headers: { Origin: allowedOrigin }, perMessageDeflate: false })
+  upstreams.add(upstream)
+  const queued = []
+  const flush = () => { for (const text of queued.splice(0)) if (upstream.readyState === WebSocket.OPEN) upstream.send(text) }
+  upstream.on('open', flush)
+  upstream.on('message', data => {
+    const delay = (proxySeq++ % 2 === 0) ? 25 : 70
+    setTimeout(() => { if (client.readyState === WebSocket.OPEN) client.send(data.toString()) }, delay)
+  })
+  upstream.on('close', () => { upstreams.delete(upstream); if (client.readyState < WebSocket.CLOSING) client.close() })
+  upstream.on('error', () => { try { client.close() } catch {} })
+  client.on('message', data => {
+    if (upstream.readyState === WebSocket.OPEN) upstream.send(data.toString())
+    else queued.push(data.toString())
+  })
+  client.on('close', () => { upstreams.delete(upstream); if (upstream.readyState < WebSocket.CLOSING) upstream.close() })
+})
+const clientUrl = `ws://127.0.0.1:${proxyPort}/ws`
+const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', 'preview', '--port', String(port), '--strictPort', '--host', '127.0.0.1'], { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, CAPBALL_WS_URL: clientUrl } })
+server.stderr?.on('data', chunk => { previewErr = (previewErr + chunk).slice(-2000) })
 let browser
-const guard = setTimeout(() => fail('timed out'), 240_000)
-function cleanup() { clearTimeout(guard); try { server.kill('SIGTERM'); roomServer.kill('SIGTERM') } catch {} }
+const guard = setTimeout(() => fail('timed out'), 480_000)
+function cleanup() { clearTimeout(guard); try { server.kill('SIGTERM'); roomServer.kill('SIGTERM') } catch {} for (const ws of upstreams) { try { ws.terminate() } catch {} } try { proxy.close() } catch {} }
 async function fail(msg) {
   console.error(`smoke: FAIL — ${msg}`)
   await browser?.close().catch(() => {})
@@ -28,14 +73,14 @@ async function waitForServer() {
     try { if ((await fetch(url)).ok) return } catch {}
     await new Promise(r => setTimeout(r, 250))
   }
-  throw new Error('preview server did not start')
+  throw new Error(`preview server did not start on ${port}${previewErr ? `: ${previewErr.trim()}` : ''}`)
 }
 async function waitForRoomServer() {
   for (let i = 0; i < 60; i++) {
     try { if ((await fetch(`http://127.0.0.1:${onlinePort}/healthz`)).ok) return } catch {}
     await new Promise(r => setTimeout(r, 250))
   }
-  throw new Error('CAPBALL online server did not start')
+  throw new Error(`CAPBALL online server did not start on ${onlinePort}${roomErr ? `: ${roomErr.trim()}` : ''}`)
 }
 const errors = []
 async function open(context, href = url) {
@@ -193,6 +238,7 @@ async function firstRunTutorial(page) {
   if (await page.evaluate(() => window.__capball.settings.tutorialStep) !== 3) throw new Error('tutorial lesson progress was not saved on leave')
   await page.reload()
   await page.waitForSelector('[data-screen="start"].is-active')
+  if (await page.evaluate(() => document.documentElement.dataset.theme) !== 'dark') throw new Error('dark mode did not survive a reload')
   await page.locator('.start-more summary').click()
   if (!(await page.locator('[data-action="tutorial:entry"]').innerText()).includes('Resume tutorial')) throw new Error('saved tutorial did not offer resume after reload')
   await page.click('[data-action="tutorial:entry"]')
@@ -207,7 +253,64 @@ async function firstRunTutorial(page) {
   await page.waitForSelector('[data-screen="setup"].is-active')
   await page.click('[data-screen="setup"] [data-action="go"]')
   await page.waitForSelector('[data-screen="hud"].is-active')
+  const darkHud = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    renderer: window.__capball.renderer.isDark,
+    meter: getComputedStyle(document.querySelector('.meter')).backgroundColor,
+    slip: getComputedStyle(document.querySelector('.slip')).backgroundColor,
+  }))
+  if (darkHud.theme !== 'dark' || !darkHud.renderer || darkHud.meter === 'rgba(243, 238, 226, 0.92)') throw new Error(`HUD did not stay dark after the tutorial: ${JSON.stringify(darkHud)}`)
 }
+/** Dark mode must be a real theme, not a tint: tokens invert, text stays readable, crews stay distinct. */
+async function assertDarkTheme(page, label, shot) {
+  const t = await page.evaluate(() => {
+    const rgb = value => {
+      const v = value.trim()
+      if (v.startsWith('#')) {
+        const n = parseInt(v.slice(1), 16)
+        return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+      }
+      const m = v.match(/rgba?\(([^)]+)\)/)
+      return m ? m[1].split(',').slice(0, 3).map(Number) : [0, 0, 0]
+    }
+    const lum = color => {
+      const [r, g, b] = rgb(color).map(v => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4 })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const contrast = (a, b) => { const la = lum(a), lb = lum(b); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05) }
+    // Same weighted distance the crew editor uses to decide two kits clash.
+    const distance = (a, b) => {
+      const [r1, g1, b1] = rgb(a), [r2, g2, b2] = rgb(b)
+      const rm = (r1 + r2) / 2, dr = r1 - r2, dg = g1 - g2, db = b1 - b2
+      return Math.sqrt((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db)
+    }
+    const root = getComputedStyle(document.documentElement)
+    const ink = root.getPropertyValue('--ink'), paper = root.getPropertyValue('--paper')
+    const card = getComputedStyle(document.querySelector('.start-wrap')).backgroundColor
+    const tagline = getComputedStyle(document.querySelector('.tagline')).color
+    const teams = window.__capball.settings.teams
+    return {
+      theme: document.documentElement.dataset.theme,
+      setting: window.__capball.settings.dark,
+      renderer: window.__capball.renderer.isDark,
+      inkPaper: contrast(ink, paper),
+      taglinePaper: contrast(tagline, paper),
+      paperLum: lum(paper),
+      cardMatchesPaper: rgb(card).join() === rgb(paper).join(),
+      crewDistance: distance(teams[0].primary, teams[1].primary),
+      crewOnCard: Math.min(contrast(teams[0].primary, paper), contrast(teams[1].primary, paper)),
+      stored: (() => { try { return JSON.parse(localStorage.getItem('capball.v1') || '{}').dark } catch { return undefined } })(),
+    }
+  })
+  if (t.theme !== 'dark' || t.setting !== true || t.renderer !== true) throw new Error(`${label}: dark theme did not apply: ${JSON.stringify(t)}`)
+  if (t.paperLum > 0.06 || !t.cardMatchesPaper) throw new Error(`${label}: dark paper token did not repaint surfaces: ${JSON.stringify(t)}`)
+  if (t.inkPaper < 7 || t.taglinePaper < 4.5) throw new Error(`${label}: dark text contrast is too low: ${JSON.stringify(t)}`)
+  if (t.crewDistance < 110 || t.crewOnCard < 1.8) throw new Error(`${label}: crews are not distinguishable in dark mode: ${JSON.stringify(t)}`)
+  if (t.stored !== true) throw new Error(`${label}: dark mode was not persisted: ${JSON.stringify(t)}`)
+  if (shot) await page.screenshot({ path: `${out}/${shot}` })
+  return t
+}
+
 async function mouseFlick(page, id, dx, dy) {
   const c = await capScreen(page, id)
   await page.mouse.move(c.x, c.y)
@@ -248,6 +351,15 @@ async function assertStartMenu(page, label) {
       scrollOverflow: screen.scrollHeight - screen.clientHeight,
       capIcon: !!document.querySelector('[data-main-mode="design"] .menu-cap-icon'),
       menuHasSoundChip: !!document.querySelector('[data-screen="start"] .start-menu [data-action="sound"]'),
+      invite: (() => {
+        const b = document.querySelector('[data-invite-entry]')
+        return b ? {
+          height: b.offsetHeight,
+          visible: b.getClientRects().length > 0,
+          inMain: !!document.querySelector('.start-main-actions [data-invite-entry]'),
+          inMore: !!document.querySelector('.start-more [data-invite-entry]'),
+        } : null
+      })(),
     }
   })
   const expected = ['Quick Match', 'Design Your Caps', 'Penalty Shootout', 'Street Tournament']
@@ -255,6 +367,8 @@ async function assertStartMenu(page, label) {
   if (Math.max(...m.widths) - Math.min(...m.widths) > 1) throw new Error(`${label} main buttons have unequal widths: ${JSON.stringify(m.widths)}`)
   if (m.heights.some(h => h < 44) || m.heights[0] <= Math.max(...m.heights.slice(1))) throw new Error(`${label} button hierarchy/tap-size mismatch: ${JSON.stringify(m.heights)}`)
   if (!m.capIcon || m.menuHasSoundChip) throw new Error(`${label} cap icon or settings relocation is missing`)
+  if (!m.invite || !m.invite.visible || m.invite.height < 44) throw new Error(`${label} Invite a Mate entry missing or too small: ${JSON.stringify(m.invite)}`)
+  if (m.invite.inMain || m.invite.inMore) throw new Error(`${label} Invite a Mate should be a dedicated entry outside the mode group and help disclosure: ${JSON.stringify(m.invite)}`)
   if (m.cardTop < -1 || m.cardBottom > m.viewportHeight + 1 || m.scrollOverflow > 2) throw new Error(`${label} menu clips or scrolls: ${JSON.stringify(m)}`)
   return m
 }
@@ -279,7 +393,7 @@ try {
     tuningHidden: document.querySelector('[data-setting-row="tuning"]').hidden,
     visible: [...document.querySelectorAll('[data-setting-row]:not([hidden])')].map(row => row.dataset.settingRow),
   }))
-  if (!normalSettings.tuningHidden || JSON.stringify(normalSettings.visible) !== JSON.stringify(['commentary', 'speech', 'sound'])) throw new Error(`normal settings visibility mismatch: ${JSON.stringify(normalSettings)}`)
+  if (!normalSettings.tuningHidden || JSON.stringify(normalSettings.visible) !== JSON.stringify(['commentary', 'speech', 'sound', 'dark'])) throw new Error(`normal settings visibility mismatch: ${JSON.stringify(normalSettings)}`)
   await page.waitForFunction(() => {
     const sheet = document.querySelector('[data-modal="settings"] .sheet')
     return !!sheet && Number(getComputedStyle(sheet).opacity) >= 0.95
@@ -291,9 +405,22 @@ try {
   const switched = await page.locator('[data-setting-switch="commentary"]').getAttribute('aria-checked')
   const switchLabel = await page.locator('[data-setting-switch="commentary"] [data-setting-state]').innerText()
   if (switched !== 'false' || switchLabel !== 'Off') throw new Error('keyboard settings switch did not expose its Off state')
+  if (await page.evaluate(() => document.documentElement.dataset.theme) !== 'light') throw new Error('light theme was not the default')
+  await page.locator('[data-setting-switch="dark"]').focus()
+  await page.keyboard.press('Space')
+  const darkSwitch = await page.locator('[data-setting-switch="dark"]').evaluate(el => ({ checked: el.getAttribute('aria-checked'), label: el.querySelector('[data-setting-state]').textContent, height: el.getBoundingClientRect().height }))
+  if (darkSwitch.checked !== 'true' || darkSwitch.label !== 'On' || darkSwitch.height < 44) throw new Error(`dark mode switch did not turn on cleanly: ${JSON.stringify(darkSwitch)}`)
+  const darkDialog = await page.evaluate(() => {
+    const sheet = getComputedStyle(document.querySelector('[data-modal="settings"] .sheet'))
+    const row = getComputedStyle(document.querySelector('[data-setting-row="dark"] .setting-description'))
+    return { theme: document.documentElement.dataset.theme, sheet: sheet.backgroundColor, row: row.color }
+  })
+  if (darkDialog.theme !== 'dark' || darkDialog.row === 'rgb(67, 62, 54)') throw new Error(`settings dialog did not repaint for dark mode: ${JSON.stringify(darkDialog)}`)
+  await page.screenshot({ path: `${out}/01-menu-settings-dark.png` })
   await page.keyboard.press('Escape')
   if (!(await page.locator('[data-modal="settings"]').evaluate(el => !el.classList.contains('is-active')))) throw new Error('Escape did not close the settings dialog')
   if (await page.evaluate(() => document.activeElement?.getAttribute('aria-label')) !== 'Open settings') throw new Error('closing settings did not restore focus to the gear')
+  await assertDarkTheme(page, 'desktop menu', '01-start-dark.png')
   await firstRunTutorial(page)
   await assertHudPause(page, 'desktop')
   await page.evaluate(() => window.__capball.match.events.emit('turn', { team: 0, reason: 'goalkick' }))
@@ -389,6 +516,13 @@ try {
   }))
   if (fullTime.mode !== 'Quick Match' || JSON.stringify(fullTime.score) !== JSON.stringify(s.goals.map(String)) || fullTime.rows.length !== 4 || !fullTime.replay || fullTime.phase !== 'over') throw new Error(`match summary or last-goal action missing: ${JSON.stringify(fullTime)}`)
   await page.screenshot({ path: `${out}/06-match-summary.png` })
+  const darkSummary = await page.evaluate(() => {
+    const card = document.querySelector('[data-modal="winner"] .match-summary')
+    const cs = getComputedStyle(card)
+    const mode = getComputedStyle(document.querySelector('[data-summary-mode]'))
+    return { theme: document.documentElement.dataset.theme, bg: cs.backgroundColor, mode: mode.color, sheetBg: getComputedStyle(card.closest('.sheet')).backgroundColor }
+  })
+  if (darkSummary.theme !== 'dark' || darkSummary.bg === 'rgb(243, 238, 226)' || darkSummary.mode === 'rgb(86, 80, 74)') throw new Error(`match summary did not repaint for dark mode: ${JSON.stringify(darkSummary)}`)
   for (const [label, width, height] of [['portrait', 390, 844], ['landscape', 844, 390]]) {
     await page.setViewportSize({ width, height })
     await page.waitForTimeout(120)
@@ -521,8 +655,12 @@ try {
   await page.click('[data-action="mode:quick"]')
   await page.waitForSelector('[data-screen="setup"].is-active')
   await page.click('[data-action="preset:proper"]')
+  const darkSetup = await page.locator('.setup-wrap').evaluate(el => ({ theme: document.documentElement.dataset.theme, bg: getComputedStyle(el).backgroundColor }))
+  if (darkSetup.theme !== 'dark' || darkSetup.bg === 'rgb(243, 238, 226)') throw new Error(`setup screen did not stay dark: ${JSON.stringify(darkSetup)}`)
   await page.screenshot({ path: `${out}/11-setup.png` })
-  for (const surf of ['dusty', 'rooftop', 'court', 'slope', 'park']) {
+  for (const surf of ['dusty', 'rooftop', 'court', 'slope', 'carpark', 'park']) {
+    const pitchCount = await page.locator('[data-screen="setup"] [data-action^="surface:"]').count()
+    if (pitchCount < 6) throw new Error(`setup offers only ${pitchCount} pitches`)
     await page.click(`[data-action="surface:${surf}"]`)
     await page.click('[data-screen="setup"] [data-action="go"]')
     await page.waitForSelector('[data-screen="hud"].is-active')
@@ -638,6 +776,187 @@ try {
   await page.screenshot({ path: `${out}/19-bracket-after.png` })
   const counts3 = await page.evaluate(() => window.__capball.debugCounts())
   if (counts3.input !== 1) throw new Error(`input handlers stacked: ${JSON.stringify(counts3)}`)
+
+  // ---------- Versus-AI tournament + cup finale ----------
+  await page.click('[data-screen="bracket"] [data-action="back"]')
+  await page.waitForSelector('[data-screen="start"].is-active')
+  await page.click('[data-screen="start"] [data-action="mode:tournament"]')
+  await page.waitForSelector('[data-screen="setup"].is-active [data-tournament-choice]')
+  const tournamentDefault = await page.evaluate(() => ({
+    local: document.querySelector('[data-action="tournament-ai:no"]')?.classList.contains('is-on'),
+    versus: document.querySelector('[data-action="tournament-ai:yes"]')?.classList.contains('is-on'),
+    aiPicker: !!document.querySelector('[data-action="ai-level:medium"]'),
+  }))
+  if (!tournamentDefault.local || tournamentDefault.versus || tournamentDefault.aiPicker) {
+    throw new Error(`tournament setup did not default to Local 2P: ${JSON.stringify(tournamentDefault)}`)
+  }
+  await page.click('[data-action="tournament-ai:yes"]')
+  await page.waitForSelector('[data-screen="setup"].is-active [data-action="ai-level:hard"]')
+  const tournamentAiChoice = await page.evaluate(() => ({
+    local: document.querySelector('[data-action="tournament-ai:no"]')?.classList.contains('is-on'),
+    versus: document.querySelector('[data-action="tournament-ai:yes"]')?.classList.contains('is-on'),
+    label: document.querySelector('[data-tournament-choice] label')?.textContent,
+  }))
+  if (tournamentAiChoice.local || !tournamentAiChoice.versus || tournamentAiChoice.label !== 'Who plays the tournament?') {
+    throw new Error(`Versus AI choice did not take: ${JSON.stringify(tournamentAiChoice)}`)
+  }
+  await page.click('[data-action="ai-level:hard"]')
+  await page.click('[data-screen="setup"] [data-action="go"]')
+  await page.waitForSelector('[data-screen="bracket"].is-active')
+  const aiBracket = await page.evaluate(() => {
+    const a = window.__capball
+    return {
+      ai: a.aiTournament,
+      setting: a.settings.tournamentAi,
+      crews: a.tournament.crews.map(t => t.name),
+      ties: a.tournament.ties.map(t => ({ id: t.id, simulated: !!t.result?.simulated, home: t.home, away: t.away, winner: t.result?.winner ?? null })),
+      copy: document.querySelector('[data-bracket]')?.innerText ?? '',
+    }
+  })
+  if (!aiBracket.ai || !aiBracket.setting) throw new Error(`Versus-AI bracket is not active: ${JSON.stringify(aiBracket)}`)
+  if (JSON.stringify(aiBracket.crews) !== JSON.stringify(['Bin Men FC', 'Alley Cats', 'Concrete Cobras', 'Pigeon Patrol'])) {
+    throw new Error(`Versus-AI roster is wrong: ${JSON.stringify(aiBracket.crews)}`)
+  }
+  if (aiBracket.ties[1].simulated !== true || aiBracket.ties[0].winner !== null) {
+    throw new Error(`AI-only semi did not auto-resolve: ${JSON.stringify(aiBracket.ties)}`)
+  }
+  if (!aiBracket.copy.includes('you vs Concrete Cobras') || !aiBracket.copy.includes('Street Legend AI')) {
+    throw new Error(`Versus-AI bracket is missing opponent/difficulty: ${aiBracket.copy}`)
+  }
+  await page.screenshot({ path: `${out}/20-ai-bracket.png` })
+
+  // Semi-final: real Versus-AI match shells with the human crew on team 0.
+  await page.click('[data-action="playtie"]')
+  await page.waitForSelector('[data-screen="hud"].is-active')
+  const aiMatch = await page.evaluate(() => ({
+    mode: window.__capball.mode,
+    ai: !!window.__capball.aiBrain,
+    teams: window.__capball.teams.map(t => t.name),
+  }))
+  if (!aiMatch.ai || aiMatch.mode !== 'tournament' || aiMatch.teams[0] !== 'Bin Men FC' || aiMatch.teams[1] !== 'Concrete Cobras') {
+    throw new Error(`Versus-AI match did not start correctly: ${JSON.stringify(aiMatch)}`)
+  }
+  // Match play is covered above; set a real score then concede to advance the bracket deterministically.
+  await page.evaluate(() => {
+    const a = window.__capball
+    a.match.score.goals = [3, 1]
+    a.match.concede(0)
+  })
+  await page.waitForSelector('[data-modal="winner"].is-active')
+  const semiWin = await page.evaluate(() => ({
+    title: document.querySelector('[data-summary-title]')?.textContent,
+    actions: document.querySelector('[data-win-actions]')?.innerText ?? '',
+  }))
+  if (!semiWin.actions.includes('Continue')) throw new Error(`semi-final win did not offer the bracket: ${JSON.stringify(semiWin)}`)
+  await page.click('[data-action="bracket"]')
+  await page.waitForSelector('[data-screen="bracket"].is-active')
+  const finalPair = await page.evaluate(() => ({
+    next: window.__capball.tournament.next?.id,
+    home: window.__capball.tournament.ties[2].home,
+    away: window.__capball.tournament.ties[2].away,
+    champion: window.__capball.tournament.champion,
+  }))
+  if (finalPair.next !== 'final' || finalPair.home !== 0 || finalPair.away === null || finalPair.champion !== null) {
+    throw new Error(`human semi win did not reach the final: ${JSON.stringify(finalPair)}`)
+  }
+  await page.click('[data-action="playtie"]')
+  await page.waitForSelector('[data-screen="hud"].is-active')
+  await page.evaluate(() => {
+    const a = window.__capball
+    a.match.score.goals = [2, 0]
+    a.match.concede(0)
+  })
+  await page.waitForSelector('[data-modal="winner"].is-active')
+  const cupAction = await page.locator('[data-win-actions]').innerText()
+  if (!cupAction.includes('Lift the cup')) throw new Error(`champion did not offer the cup screen: ${cupAction}`)
+  await page.click('[data-action="cup"]')
+  await page.waitForSelector('[data-screen="cup"].is-active')
+  const cup = await page.evaluate(() => {
+    const a = window.__capball
+    return {
+      champion: a.tournament.champion,
+      name: document.querySelector('.cup-champ')?.textContent,
+      champVar: document.querySelector('.cup-champ')?.style.getPropertyValue('--champ'),
+      trophy: !!document.querySelector('.cup-trophy svg'),
+      finalScores: [...document.querySelectorAll('.cup-final-side strong')].map(el => el.textContent.trim()),
+      finalLabel: document.querySelector('.cup-final-label')?.textContent,
+      caps: document.querySelectorAll('.cup-crew canvas').length,
+      ties: document.querySelectorAll('.cup-wrap .tie').length,
+      actions: [...document.querySelectorAll('.cup-actions [data-action]')].map(el => el.dataset.action),
+      headline: document.querySelector('.cup-wrap h2')?.textContent,
+      layout: (() => {
+        const card = document.querySelector('.cup-wrap').getBoundingClientRect()
+        const screen = document.querySelector('.screen-cup')
+        return { top: card.top, bottom: card.bottom, height: card.height, client: screen.clientHeight, scroll: screen.scrollHeight, viewport: innerHeight }
+      })(),
+    }
+  })
+  console.log('smoke: cup layout', JSON.stringify(cup.layout))
+  if (cup.layout.top < -1 || (cup.layout.scroll > cup.layout.client + 2 && cup.layout.height > cup.layout.viewport)) {
+    throw new Error(`cup screen clips its card: ${JSON.stringify(cup.layout)}`)
+  }
+  if (cup.champion !== 0 || cup.name !== 'Bin Men FC' || !cup.champVar || !cup.trophy) {
+    throw new Error(`cup winner screen is wrong: ${JSON.stringify(cup)}`)
+  }
+  if (JSON.stringify(cup.finalScores) !== JSON.stringify(['2', '0']) || cup.finalLabel !== 'Cup final') {
+    throw new Error(`cup final score is wrong: ${JSON.stringify(cup)}`)
+  }
+  if (cup.caps !== 5 || cup.ties !== 3 || !cup.actions.includes('mode:tournament') || !cup.actions.includes('back')) {
+    throw new Error(`cup screen is missing crew/bracket/actions: ${JSON.stringify(cup)}`)
+  }
+  await page.screenshot({ path: `${out}/21-ai-cup.png` })
+
+  // Eliminated path: the human loses the semi and the final resolves between the AI crews.
+  await page.click('.cup-actions [data-action="back"]')
+  await page.waitForSelector('[data-screen="start"].is-active')
+  await page.click('[data-screen="start"] [data-action="mode:tournament"]')
+  await page.waitForSelector('[data-screen="setup"].is-active [data-action="ai-level:hard"]')
+  const persistedChoice = await page.evaluate(() => document.querySelector('[data-action="tournament-ai:yes"]')?.classList.contains('is-on'))
+  if (!persistedChoice) throw new Error('Versus AI choice was not remembered between tournaments')
+  await page.click('[data-screen="setup"] [data-action="go"]')
+  await page.waitForSelector('[data-screen="bracket"].is-active')
+  await page.click('[data-action="playtie"]')
+  await page.waitForSelector('[data-screen="hud"].is-active')
+  await page.evaluate(() => {
+    const a = window.__capball
+    a.match.score.goals = [1, 4]
+    a.match.concede(1)
+  })
+  await page.waitForSelector('[data-modal="winner"].is-active')
+  const eliminated = await page.evaluate(() => ({
+    title: document.querySelector('[data-summary-title]')?.textContent,
+    actions: document.querySelector('[data-win-actions]')?.innerText ?? '',
+    champion: window.__capball.tournament.champion,
+    finalSimulated: !!window.__capball.tournament.ties[2].result?.simulated,
+  }))
+  if (eliminated.champion === 0 || eliminated.champion === null) throw new Error(`AI champion missing after human exit: ${JSON.stringify(eliminated)}`)
+  if (!eliminated.finalSimulated) throw new Error(`AI-vs-AI final was not auto-resolved: ${JSON.stringify(eliminated)}`)
+  if (!eliminated.title?.includes('Your run ends here') || !eliminated.actions.includes('See who lifts the cup')) {
+    throw new Error(`elimination summary is dishonest or missing the cup: ${JSON.stringify(eliminated)}`)
+  }
+  await page.click('[data-action="cup"]')
+  await page.waitForSelector('[data-screen="cup"].is-active')
+  const aiCup = await page.evaluate(() => {
+    const a = window.__capball
+    const champion = a.tournament.champion
+    return {
+      champion,
+      name: document.querySelector('.cup-champ')?.textContent,
+      expected: a.tournament.crews[champion].name,
+      sub: document.querySelector('.cup-sub')?.textContent,
+      ties: document.querySelectorAll('.cup-wrap .tie').length,
+      simulated: a.tournament.ties.filter(t => t.result?.simulated).length,
+    }
+  })
+  if (aiCup.champion === 0 || aiCup.name !== aiCup.expected) {
+    throw new Error(`cup screen did not show the actual AI champion: ${JSON.stringify(aiCup)}`)
+  }
+  if (!aiCup.sub?.includes('street machine takes the cup') || aiCup.ties !== 3 || aiCup.simulated < 1) {
+    throw new Error(`eliminated cup screen is incomplete: ${JSON.stringify(aiCup)}`)
+  }
+  await page.screenshot({ path: `${out}/22-ai-cup-eliminated.png` })
+  await page.click('.cup-actions [data-action="back"]')
+  await page.waitForSelector('[data-screen="start"].is-active')
   await desk.close()
 
   // ---------- Local hidden penalty commit–reveal ----------
@@ -791,14 +1110,26 @@ try {
   // ---------- Phase 4: two real browser clients over the authoritative room server ----------
   const onlineCtxA = await browser.newContext({ viewport: { width: 1080, height: 760 } })
   const onlineA = await open(onlineCtxA)
-  await onlineA.locator('.start-more summary').click()
-  await onlineA.click('[data-action="mode:online"]')
+  await onlineA.click('[data-invite-entry]')
   await onlineA.waitForSelector('[data-screen="online"].is-active')
+  await onlineA.waitForSelector('[data-action="online:create"]:not([disabled])', { timeout: 5000 })
+  const onlinePitches = await onlineA.locator('[data-screen="online"] [data-action^="surface:"]').count()
+  if (onlinePitches < 6) throw new Error(`invite screen offers only ${onlinePitches} pitches`)
+  await onlineA.click('[data-screen="online"] [data-action="surface:carpark"]')
+  await onlineA.waitForSelector('[data-screen="online"] [data-action="surface:carpark"].is-on')
+  if (await onlineA.evaluate(() => window.__capball.settings.surface) !== 'carpark') throw new Error('invite pitch choice was not kept')
+  await onlineA.waitForSelector('[data-action="online:create"]:not([disabled])', { timeout: 5000 })
   await onlineA.click('[data-action="online:create"]')
   await onlineA.waitForSelector('[data-screen="hud"].is-active', { timeout: 15000 })
   await onlineA.waitForFunction(() => window.__capball.onlineState?.ready === false && window.__capball.onlineClient?.state === 'open', null, { timeout: 15000 })
   const room = await onlineA.evaluate(() => window.__capball.onlineClient.room)
   if (!room) throw new Error('room server did not assign a room code')
+  const waitCard = await onlineA.locator('[data-online-wait]').evaluate(el => ({
+    hidden: el.hidden,
+    code: el.querySelector('[data-online-wait-code]')?.textContent?.trim(),
+    copy: el.querySelector('[data-online-wait-copy]')?.textContent ?? '',
+  }))
+  if (waitCard.hidden || waitCard.code !== room || !/waiting for your mate/i.test(waitCard.copy)) throw new Error(`waiting-for-mate card is missing the room code: ${JSON.stringify(waitCard)}`)
   await clickPauseAction(onlineA, 'online-copy')
   await onlineA.waitForFunction(code => document.querySelector('[data-caption]')?.textContent.includes(code), room, { timeout: 5000 })
   await clickPauseAction(onlineA, 'resume')
@@ -808,23 +1139,96 @@ try {
   invite.searchParams.set('room', room)
   const onlineCtxB = await browser.newContext({ viewport: { width: 1080, height: 760 } })
   const onlineB = await open(onlineCtxB, invite.href)
-  await onlineB.locator('.start-more summary').click()
-  await onlineB.click('[data-action="mode:online"]') // deep link auto-joins the room
+  await onlineB.click('[data-invite-entry]') // deep link auto-joins the room
   await onlineB.waitForSelector('[data-screen="hud"].is-active', { timeout: 15000 })
   await onlineA.waitForFunction(() => window.__capball.onlineState?.ready && window.__capball.onlineTeam === 0, null, { timeout: 15000 })
   await onlineB.waitForFunction(() => window.__capball.onlineState?.ready && window.__capball.onlineTeam === 1, null, { timeout: 15000 })
+  await onlineA.waitForFunction(() => document.querySelector('[data-online-wait]')?.hidden === true, null, { timeout: 5000 })
+  const pitches = await Promise.all([onlineA, onlineB].map(p => p.evaluate(() => ({
+    wire: window.__capball.onlineState?.surface,
+    world: window.__capball.match?.world.surface.id,
+  }))))
+  if (pitches.some(p => p.wire !== 'carpark' || p.world !== 'carpark')) throw new Error(`host pitch was not shared with both seats: ${JSON.stringify(pitches)}`)
   const seatOnePickable = await onlineB.evaluate(() => window.__capball.pickable().map(c => c.id))
   if (seatOnePickable.length) throw new Error(`second online seat received input while team 0 had the turn: ${seatOnePickable}`)
   await onlineA.screenshot({ path: `${out}/27-online-ready.png` })
 
+  // ---------- measured link diagnostics under the delay/jitter proxy ----------
+  await onlineA.waitForFunction(() => {
+    const d = window.__capball.debugOnline()
+    return d.rttMs !== null && Number.isFinite(d.rttMs) && d.seq > 0
+  }, null, { timeout: 15000 })
+  const diagBefore = await onlineA.evaluate(() => window.__capball.debugOnline())
+  if (diagBefore.rttMs < 10 || diagBefore.rttMs > 2000) throw new Error(`online RTT was not measured through the delay proxy: ${JSON.stringify(diagBefore)}`)
+  await onlineA.click('.hud-tools [data-action="pause"]')
+  await onlineA.waitForSelector('[data-modal="pause"].is-active')
+  await onlineA.waitForTimeout(650)
+  const diagUi = await onlineA.locator('[data-modal="pause"] [data-online-diag]').evaluate(el => {
+    const sheet = el.closest('.pause-sheet')
+    const r = sheet.getBoundingClientRect()
+    return {
+      hidden: el.hidden,
+      rtt: el.querySelector('[data-diag="rtt"]')?.textContent ?? '',
+      jitter: el.querySelector('[data-diag="jitter"]')?.textContent ?? '',
+      seq: el.querySelector('[data-diag="seq"]')?.textContent ?? '',
+      correction: el.querySelector('[data-diag="correction"]')?.textContent ?? '',
+      reconnects: el.querySelector('[data-diag="reconnects"]')?.textContent ?? '',
+      overflow: r.top < -1 || r.bottom > innerHeight + 1 || sheet.scrollHeight > sheet.clientHeight + 1,
+    }
+  })
+  if (diagUi.hidden || !/ms/.test(diagUi.rtt) || !/^\d+$/.test(diagUi.seq) || diagUi.reconnects !== '0' || diagUi.overflow) {
+    throw new Error(`online pause diagnostics are missing or unmeasured: ${JSON.stringify(diagUi)}`)
+  }
+  await onlineA.screenshot({ path: `${out}/31-online-pause-diagnostics.png` })
+  // The same sheet must still fit a short landscape phone with the diagnostics row shown.
+  await onlineA.setViewportSize({ width: 844, height: 390 })
+  await onlineA.waitForTimeout(250)
+  const diagLandscape = await onlineA.locator('[data-modal="pause"].is-active .pause-sheet').evaluate(sheet => {
+    const r = sheet.getBoundingClientRect()
+    const buttons = [...sheet.querySelectorAll('.pause-actions .btn, .pause-resume, .pause-concede')].filter(el => !el.hidden && el.offsetParent)
+    return {
+      top: Math.round(r.top), bottom: Math.round(r.bottom), innerHeight,
+      scroll: sheet.scrollHeight - sheet.clientHeight,
+      small: buttons.filter(el => el.getBoundingClientRect().height < 44).map(el => el.textContent.trim()),
+      diag: sheet.querySelector('[data-online-diag]')?.hidden === false,
+    }
+  })
+  if (diagLandscape.top < -1 || diagLandscape.bottom > diagLandscape.innerHeight + 1 || diagLandscape.scroll > 1 || diagLandscape.small.length || !diagLandscape.diag) {
+    throw new Error(`online pause sheet does not fit landscape with diagnostics: ${JSON.stringify(diagLandscape)}`)
+  }
+  await onlineA.screenshot({ path: `${out}/32-online-pause-landscape.png` })
+  await onlineA.setViewportSize({ width: 1080, height: 760 })
+  await onlineA.waitForTimeout(150)
+  await onlineA.keyboard.press('Escape')
+  await onlineA.waitForFunction(() => !document.querySelector('[data-modal="pause"]').classList.contains('is-active'))
+
   await mouseFlick(onlineA, 4, -105, 5)
   await waitForFunction(onlineA, () => window.__capball.onlineState?.phase === 'moving', 15000)
   await waitForFunction(onlineB, () => window.__capball.onlineState?.phase === 'moving', 15000)
-  const [snapshotA, snapshotB] = await Promise.all([
-    onlineA.evaluate(() => window.__capball.onlineState.bodies[4]),
-    onlineB.evaluate(() => window.__capball.onlineState.bodies[4]),
-  ])
-  if (Math.abs(snapshotA.x - snapshotB.x) > 1 || Math.abs(snapshotA.y - snapshotB.y) > 1) throw new Error(`authoritative board did not converge across seats: ${JSON.stringify({ snapshotA, snapshotB })}`)
+  // Under the delay/jitter proxy the two seats can be a snapshot apart at any instant. Convergence
+  // means both seats apply the same authoritative sequence, not that their arrival times match.
+  const seenA = new Map()
+  const seenB = new Map()
+  let converged = null
+  for (let i = 0; i < 80 && !converged; i++) {
+    const [a, b] = await Promise.all([onlineA, onlineB].map(p => p.evaluate(() => ({ seq: window.__capball.onlineState?.seq, body: window.__capball.onlineState?.bodies[4] }))))
+    if (a.seq !== undefined) seenA.set(a.seq, a.body)
+    if (b.seq !== undefined) seenB.set(b.seq, b.body)
+    for (const [seq, bodyA] of seenA) {
+      if (seenB.has(seq)) { converged = { seq, bodyA, bodyB: seenB.get(seq) }; break }
+    }
+    if (!converged) await new Promise(r => setTimeout(r, 25))
+  }
+  if (!converged) throw new Error('seats never applied the same authoritative snapshot sequence')
+  const snapshotA = converged.bodyA
+  const snapshotB = converged.bodyB
+  if (Math.abs(snapshotA.x - snapshotB.x) > 1 || Math.abs(snapshotA.y - snapshotB.y) > 1) throw new Error(`authoritative board did not converge across seats at seq ${converged.seq}: ${JSON.stringify({ snapshotA, snapshotB })}`)
+  await onlineA.waitForFunction(prev => window.__capball.debugOnline().seq > prev, diagBefore.seq, { timeout: 10000 })
+  const diagAfter = await onlineA.evaluate(() => window.__capball.debugOnline())
+  if (!(diagAfter.smoother.residualPx <= 240) || !(diagAfter.smoother.maxResidualPx <= 240) || diagAfter.pendingPredictions > 20) {
+    throw new Error(`online reconciliation exceeded its bounds: ${JSON.stringify(diagAfter)}`)
+  }
+  console.log(`smoke: online link — RTT ${diagAfter.rttMs} ms, jitter ${diagAfter.jitterMs} ms, snapshot ${diagAfter.seq}, corrections ${diagAfter.corrections} (last ${diagAfter.lastCorrectionPx} px, max ${diagAfter.maxCorrectionPx} px), render residual ${diagAfter.smoother.residualPx} px, snaps ${diagAfter.smoother.snapped}, stale ${diagAfter.stale}, gaps ${diagAfter.gaps}`)
   await onlineA.screenshot({ path: `${out}/28-online-flick.png` })
 
   await waitForFunction(onlineA, () => window.__capball.onlineState?.phase === 'aim' && window.__capball.onlineState?.team === 1, 30000)
@@ -834,6 +1238,29 @@ try {
   await onlineB.screenshot({ path: `${out}/29-online-reply.png` })
   await onlineCtxA.close()
   await onlineCtxB.close()
+
+  // ---------- the Invite a Mate help screen is honest when no public room server exists ----------
+  const offlineCtx = await browser.newContext({ viewport: { width: 1000, height: 720 } })
+  await offlineCtx.route('**/multiplayer/bootstrap.json', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ version: 1, build: 'capball-online-v1', signalingUrl: '' }),
+  }))
+  const offline = await open(offlineCtx)
+  await offline.click('[data-invite-entry]')
+  await offline.waitForSelector('[data-screen="online"].is-active')
+  await offline.waitForSelector('[data-online-config][data-state="off"]', { timeout: 5000 })
+  const offUi = await offline.evaluate(() => ({
+    note: document.querySelector('[data-online-config]')?.textContent ?? '',
+    status: document.querySelector('[data-online-status]')?.textContent ?? '',
+    createDisabled: document.querySelector('[data-action="online:create"]')?.disabled === true,
+    joinDisabled: document.querySelector('[data-action="online:join"]')?.disabled === true,
+  }))
+  if (!/not configured/i.test(offUi.note) || !/public room server/i.test(offUi.status) || !offUi.createDisabled || !offUi.joinDisabled) {
+    throw new Error(`online should fail closed when unconfigured: ${JSON.stringify(offUi)}`)
+  }
+  await offline.screenshot({ path: `${out}/30-online-unconfigured.png` })
+  await offlineCtx.close()
 
   if (errors.length) throw new Error(`console errors:\n  ${errors.join('\n  ')}`)
   await browser.close()

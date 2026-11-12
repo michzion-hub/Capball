@@ -37,9 +37,33 @@ const LOOKS: Record<SurfaceId, Look> = {
   rooftop: { surround: '#1c2129', base: '#4a4d55', stripeA: '#50535b', stripeB: '#45484f', line: 'rgba(255,214,64,0.9)', board: '#9a968e', boardEdge: '#6c6962', grit: ['#3d4047', '#5d6068', '#6b6e75'], gritCount: 1400, lineWobble: 0.6, tags: ['DANGER: EDGE', 'HVAC', 'CAPBALL'] },
   court: { surround: '#141a2a', base: '#2a7ab8', stripeA: '#2f84c4', stripeB: '#2a7ab8', line: 'rgba(255,255,255,0.96)', board: '#e2483d', boardEdge: '#9b2a22', grit: ['#3a8dce'], gritCount: 120, lineWobble: 0, tags: ['WET FLOOR', 'CAPBALL', 'NO SKATING'] },
   slope: { surround: '#2e2a26', base: '#6f9440', stripeA: '#79a04a', stripeB: '#688b3b', line: 'rgba(250,248,235,0.9)', board: '#7b5233', boardEdge: '#52341d', grit: ['#5b7d33', '#8bb05a', '#9b9161'], gritCount: 900, lineWobble: 1.6, tags: ['DOWNHILL ↓', 'CAPBALL', 'MIND THE HILL'] },
+  carpark: { surround: '#1e2024', base: '#5b5e63', stripeA: '#616468', stripeB: '#5b5e63', line: 'rgba(248,246,238,0.9)', board: '#3f6f96', boardEdge: '#2a4a66', grit: ['#4a4d52', '#6b6e73', '#84878c'], gritCount: 1100, lineWobble: 0.9, tags: ['LEVEL 3', 'CAPBALL', 'MIND THE PILLAR'] },
 }
 
 export function surfaceAccent(id: SurfaceId): string { return LOOKS[id].line }
+
+/** Night variant: the same pitch identity, dimmed under streetlights, with markings left bright. */
+function dim(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16)
+  const r = Math.round(((n >> 16) & 255) * k)
+  const g = Math.round(((n >> 8) & 255) * k)
+  const b = Math.round((n & 255) * k)
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`
+}
+
+const DARK_LOOKS = Object.fromEntries((Object.keys(LOOKS) as SurfaceId[]).map(id => {
+  const L = LOOKS[id]
+  return [id, {
+    ...L,
+    surround: dim(L.surround, 0.5),
+    base: dim(L.base, 0.55),
+    stripeA: dim(L.stripeA, 0.55),
+    stripeB: dim(L.stripeB, 0.55),
+    board: dim(L.board, 0.6),
+    boardEdge: dim(L.boardEdge, 0.5),
+    grit: L.grit.map(c => dim(c, 0.62)),
+  }]
+})) as Record<SurfaceId, Look>
 
 function wobbleLine(ctx: CanvasRenderingContext2D, pts: [number, number][], wob: number, r: () => number): void {
   ctx.beginPath()
@@ -57,8 +81,8 @@ function segs(x0: number, y0: number, x1: number, y1: number, n = 10): [number, 
 }
 
 /** Draws the full static backdrop in world units: surround, surface, markings, boards. */
-export function drawPitch(ctx: CanvasRenderingContext2D, id: SurfaceId): void {
-  const L = LOOKS[id]
+export function drawPitch(ctx: CanvasRenderingContext2D, id: SurfaceId, dark = false): void {
+  const L = dark ? DARK_LOOKS[id] : LOOKS[id]
   const r = rng(id.length * 7919 + 17)
 
   // Surround (street / roof / gym floor)
@@ -82,6 +106,17 @@ export function drawPitch(ctx: CanvasRenderingContext2D, id: SurfaceId): void {
     for (let y = 0; y < H; y += 62) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
     ctx.fillStyle = 'rgba(0,0,0,0.12)'
     for (let i = 0; i < 9; i++) { ctx.beginPath(); ctx.ellipse(r() * W, r() * H, 20 + r() * 50, 10 + r() * 22, r() * 3, 0, Math.PI * 2); ctx.fill() }
+  } else if (id === 'carpark') {
+    // painted concrete: parking bays under the pitch, oil drips in the middle
+    ctx.strokeStyle = 'rgba(240,238,228,0.20)'
+    ctx.lineWidth = 6
+    for (let x = 60; x < W; x += 130) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 128); ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(x, H - 128); ctx.lineTo(x, H); ctx.stroke()
+    }
+    for (const y of [128, H - 128]) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
+    ctx.fillStyle = 'rgba(20,22,24,0.20)'
+    for (let i = 0; i < 7; i++) { ctx.beginPath(); ctx.ellipse(r() * W, 150 + r() * (H - 300), 26 + r() * 46, 12 + r() * 18, r() * 3, 0, Math.PI * 2); ctx.fill() }
   } else {
     const n = 12
     for (let i = 0; i < n; i++) { ctx.fillStyle = i % 2 ? L.stripeA : L.stripeB; ctx.fillRect((W / n) * i, 0, W / n + 0.5, H) }

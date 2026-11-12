@@ -44,6 +44,7 @@ export class Renderer {
   private pitchKey = ''
   private sprites = new SpriteCache()
   private surface: SurfaceId = 'park'
+  private dark = false
   private designs: [TeamDesign, TeamDesign]
   private designKey = ''
   private ballRoll = 0
@@ -69,6 +70,14 @@ export class Renderer {
 
   setSurface(id: SurfaceId): void { this.surface = id }
 
+  get isDark(): boolean { return this.dark }
+
+  setDark(on: boolean): void {
+    if (this.dark === on) return
+    this.dark = on
+    this.pitchLayer = null
+  }
+
   setDesigns(d: [TeamDesign, TeamDesign]): void {
     this.designs = d
     const key = JSON.stringify(d)
@@ -78,7 +87,7 @@ export class Renderer {
   private ensurePitch(): HTMLCanvasElement {
     const v = this.view
     const pxu = v.scale * v.dpr
-    const key = `${this.surface}:${pxu.toFixed(4)}`
+    const key = `${this.surface}:${this.dark ? 'dark' : 'light'}:${pxu.toFixed(4)}`
     if (this.pitchLayer && key === this.pitchKey) return this.pitchLayer
     const m = PITCH.viewMargin * 1.6
     const c = this.pitchLayer ?? document.createElement('canvas')
@@ -86,7 +95,7 @@ export class Renderer {
     c.height = Math.ceil((PITCH.height + 2 * m) * pxu)
     const ctx = c.getContext('2d')!
     ctx.setTransform(pxu, 0, 0, pxu, m * pxu, m * pxu)
-    drawPitch(ctx, this.surface)
+    drawPitch(ctx, this.surface, this.dark)
     this.pitchLayer = c
     this.pitchKey = key
     return c
@@ -96,7 +105,7 @@ export class Renderer {
     const ctx = this.ctx
     const v = this.view
     ctx.setTransform(1, 0, 0, 1, 0, 0)
-    ctx.fillStyle = '#18171b'
+    ctx.fillStyle = this.dark ? '#0c0b0e' : '#18171b'
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height)
 
     v.apply(ctx, this.shake.x, this.shake.y)
